@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import {
   Home, Calendar, Check, Plus, Trash2, Briefcase, Utensils, HeartPulse,
   RefreshCw, ChevronLeft, ChevronRight, User, X, Flame, TrendingUp,
-  Stethoscope, Lightbulb, ArrowRight, Pencil, LogOut, Heart
+  Stethoscope, Lightbulb, ArrowRight, Pencil, LogOut, Heart, CircleSlash
 } from "lucide-react";
 
 const SEED_PEOPLE = {
@@ -208,6 +208,20 @@ function Routine() {
     patchWeek({ done: { ...week.done, [k]: !week.done[k] } });
   };
 
+  // Marcar uma tarefa da rotina como "não precisou" só nesta semana (não conta como pendente)
+  const toggleSkip = (t, d) => {
+    const k = `${t.id}:${d}`;
+    const nextSkip = { ...week.skip, [k]: !week.skip[k] };
+    // ao marcar "não precisou", tira a marca de feita (se houver), pra não contar duplo
+    const nextDone = { ...week.done };
+    if (nextSkip[k]) delete nextDone[k];
+    patchWeek({ skip: nextSkip, done: nextDone });
+  };
+
+  // ---- Atividades avulsas (só nesta semana, não viram rotina) ----
+  const addExtra = (e) => patchWeek({ extras: [...(week.extras || []), { id: "x" + Date.now(), ...e }] });
+  const removeExtra = (id) => patchWeek({ extras: (week.extras || []).filter((x) => x.id !== id) });
+
   const togglePresence = (person, d) => {
     const cur = week.presence[person] || [];
     const next = cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d];
@@ -281,8 +295,13 @@ function Routine() {
   }, [weeks, templates]);
 
   const todayTasks = useMemo(
-    () => templates.filter((t) => effectiveDays(t).includes(ti) && !isSkipped(t, ti)),
-    [templates, ti, effectiveDays, week]
+    () => templates.filter((t) => effectiveDays(t).includes(ti)),
+    [templates, ti, effectiveDays]
+  );
+
+  const todayExtras = useMemo(
+    () => (week.extras || []).filter((e) => e.day === ti),
+    [week, ti]
   );
 
   if (error) {
@@ -383,7 +402,7 @@ function Routine() {
         <div style={{ animation: "fade .25s ease" }}>
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 14 }}>
             <div style={{ fontSize: 16, fontWeight: 500 }}>{DAY_FULL[ti]}</div>
-            <div style={{ fontSize: 12.5, color: C.sub }}>{todayTasks.filter((t) => isDone(t, ti)).length} de {todayTasks.length} feitas</div>
+            <div style={{ fontSize: 12.5, color: C.sub }}>{[...todayTasks.filter((t) => !isSkipped(t, ti)), ...todayExtras].filter((x) => isDone(x, ti)).length} de {todayTasks.filter((t) => !isSkipped(t, ti)).length + todayExtras.length} feitas</div>
           </div>
 
           {/* presence-aware nudge */}
@@ -402,37 +421,78 @@ function Routine() {
             const groups = order.map((pk) => ({
               pk,
               tasks: todayTasks.filter((t) => t.who === pk),
+              extras: todayExtras.filter((e) => e.who === pk),
               appts: dayAppts.filter((a) => a.who === pk),
-            })).filter((g) => g.tasks.length || g.appts.length);
+            })).filter((g) => g.tasks.length || g.extras.length || g.appts.length);
             if (groups.length === 0) {
               return <div style={{ textAlign: "center", padding: "40px 0", color: C.faint, fontSize: 13.5 }}>Nada para hoje. Respira e aproveita.</div>;
             }
             return (
               <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                 {groups.map((g) => {
-                  const p = PEOPLE[g.pk]; const doneCount = g.tasks.filter((t) => isDone(t, ti)).length;
+                  const p = PEOPLE[g.pk];
+                  const countItems = [...g.tasks.filter((t) => !isSkipped(t, ti)), ...g.extras];
+                  const doneCount = countItems.filter((x) => isDone(x, ti)).length;
                   return (
                     <div key={g.pk}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                         <span style={{ width: 9, height: 9, borderRadius: 99, background: p.color }} />
                         <div style={{ fontSize: 13, fontWeight: 500, color: p.color }}>{p.name}</div>
-                        {g.tasks.length > 0 && <div style={{ fontSize: 11.5, color: C.faint }}>{doneCount}/{g.tasks.length}</div>}
+                        {countItems.length > 0 && <div style={{ fontSize: 11.5, color: C.faint }}>{doneCount}/{countItems.length}</div>}
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         {g.tasks.map((t) => {
-                          const done = isDone(t, ti); const cat = CATEGORIES[t.cat]; const Ic = cat.icon;
+                          const done = isDone(t, ti); const skipped = isSkipped(t, ti);
+                          const cat = CATEGORIES[t.cat]; const Ic = cat.icon;
+                          if (skipped) {
+                            return (
+                              <div key={t.id} className="rot-row"
+                                style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", opacity: 0.55 }}>
+                                <div onClick={() => toggleSkip(t, ti)} title="Voltar — precisa fazer" style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `1px dashed ${C.line2}`, background: "transparent" }}>
+                                  <CircleSlash size={13} color={C.faint} />
+                                </div>
+                                <div onClick={() => toggleSkip(t, ti)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                                  <div style={{ fontSize: 14.5, textDecoration: "line-through", color: C.sub }}>{t.title}</div>
+                                  <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                                    <Tag soft="#F1F0EC" color={C.faint}>não precisou</Tag>
+                                  </div>
+                                </div>
+                                <button onClick={() => toggleSkip(t, ti)} title="Voltar — precisa fazer" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0 }}><RefreshCw size={13} color={C.faint} /></button>
+                              </div>
+                            );
+                          }
                           return (
-                            <div key={t.id} className="rot-row" onClick={() => toggleDone(t, ti)}
-                              style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", cursor: "pointer", opacity: done ? 0.55 : 1, transition: "opacity .15s, border-color .15s" }}>
-                              <div style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
+                            <div key={t.id} className="rot-row"
+                              style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", opacity: done ? 0.55 : 1, transition: "opacity .15s, border-color .15s" }}>
+                              <div onClick={() => toggleDone(t, ti)} style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
                                 {done && <Check size={13} color="#fff" />}
                               </div>
-                              <div style={{ flex: 1, minWidth: 0 }}>
+                              <div onClick={() => toggleDone(t, ti)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
                                 <div style={{ fontSize: 14.5, textDecoration: done ? "line-through" : "none" }}>{t.title}</div>
                                 <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                                   <Tag soft={cat.soft} color={cat.color}><Ic size={11} /> {cat.label}</Tag>
                                 </div>
                               </div>
+                              <button onClick={() => toggleSkip(t, ti)} title="Não precisou esta semana" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0 }}><CircleSlash size={15} color={C.faint} /></button>
+                            </div>
+                          );
+                        })}
+                        {g.extras.map((e) => {
+                          const done = isDone(e, ti); const cat = CATEGORIES[e.cat] || CATEGORIES.vida; const Ic = cat.icon;
+                          return (
+                            <div key={e.id} className="rot-row"
+                              style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", opacity: done ? 0.55 : 1, transition: "opacity .15s, border-color .15s" }}>
+                              <div onClick={() => toggleDone(e, ti)} style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
+                                {done && <Check size={13} color="#fff" />}
+                              </div>
+                              <div onClick={() => toggleDone(e, ti)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                                <div style={{ fontSize: 14.5, textDecoration: done ? "line-through" : "none" }}>{e.title}</div>
+                                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                                  <Tag soft={cat.soft} color={cat.color}><Ic size={11} /> {cat.label}</Tag>
+                                  <Tag soft="#F1F0EC" color={C.faint}>avulsa</Tag>
+                                </div>
+                              </div>
+                              <button onClick={() => removeExtra(e.id)} title="Remover" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0 }}><Trash2 size={14} color={C.faint} /></button>
                             </div>
                           );
                         })}
@@ -452,6 +512,8 @@ function Routine() {
               </div>
             );
           })()}
+
+          <ExtraAdder onAdd={addExtra} C={C} PEOPLE={PEOPLE} ti={ti} />
         </div>
       )}
 
@@ -479,7 +541,8 @@ function Routine() {
               <tbody>
                 {["rafa", "lucas", "both"].map((pk) => {
                   const items = templates.filter((t) => t.who === pk);
-                  if (!items.length) return null;
+                  const extrasFor = (week.extras || []).filter((e) => e.who === pk);
+                  if (!items.length && !extrasFor.length) return null;
                   const pp = PEOPLE[pk];
                   return (
                     <React.Fragment key={pk}>
@@ -502,17 +565,47 @@ function Routine() {
                               </div>
                             </td>
                             {DAYS.map((d, i) => {
-                              const sched = days.includes(i); const done = isDone(t, i);
+                              const sched = days.includes(i); const done = isDone(t, i); const skipped = isSkipped(t, i);
                               return (
                                 <td key={d} style={{ textAlign: "center", padding: "9px 2px" }}>
-                                  {sched ? (
+                                  {!sched ? (
+                                    <span style={{ color: "#E0DFD9" }}>·</span>
+                                  ) : skipped ? (
+                                    <button onClick={() => toggleSkip(t, i)} title="Não precisou esta semana — clique para restaurar"
+                                      style={{ width: 22, height: 22, margin: "0 auto", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", border: `1px dashed ${C.line2}`, background: "transparent" }}>
+                                      <CircleSlash size={12} color={C.faint} />
+                                    </button>
+                                  ) : (
                                     <button onClick={() => toggleDone(t, i)} style={{ width: 22, height: 22, margin: "0 auto", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
                                       {done && <Check size={12} color="#fff" />}
                                     </button>
-                                  ) : <span style={{ color: "#E0DFD9" }}>·</span>}
+                                  )}
                                 </td>
                               );
                             })}
+                          </tr>
+                        );
+                      })}
+                      {extrasFor.map((e) => {
+                        const cat = CATEGORIES[e.cat] || CATEGORIES.vida; const done = isDone(e, e.day);
+                        return (
+                          <tr key={e.id} style={{ borderTop: `1px solid ${C.line}` }}>
+                            <td style={{ padding: "9px 8px 9px 0" }}>
+                              <div style={{ fontSize: 12.5, lineHeight: 1.3, paddingLeft: 14, display: "flex", alignItems: "center", gap: 6 }}>
+                                <span>{e.title}</span>
+                                <span style={{ fontSize: 10, color: C.faint }}>· avulsa</span>
+                                <button onClick={() => removeExtra(e.id)} title="Remover" style={{ background: "none", border: "none", cursor: "pointer", padding: 0, lineHeight: 0 }}><Trash2 size={12} color={C.faint} /></button>
+                              </div>
+                            </td>
+                            {DAYS.map((d, i) => (
+                              <td key={d} style={{ textAlign: "center", padding: "9px 2px" }}>
+                                {i === e.day ? (
+                                  <button onClick={() => toggleDone(e, i)} style={{ width: 22, height: 22, margin: "0 auto", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
+                                    {done && <Check size={12} color="#fff" />}
+                                  </button>
+                                ) : <span style={{ color: "#E0DFD9" }}>·</span>}
+                              </td>
+                            ))}
                           </tr>
                         );
                       })}
@@ -522,6 +615,12 @@ function Routine() {
               </tbody>
             </table>
           </div>
+
+          {Object.values(week.skip || {}).some(Boolean) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: C.faint, marginTop: 10 }}>
+              <CircleSlash size={12} /> não precisou esta semana (não conta como pendente)
+            </div>
+          )}
 
           {/* Compromissos da semana (eventos por pessoa) */}
           {(week.appts || []).some((a) => a.day != null) && (
@@ -625,7 +724,7 @@ function Routine() {
                           <span style={{ width: 9, height: 9, borderRadius: 3, background: "#FAF0E4", border: "1px solid #B06A2C" }} /> os dois em casa
                         </span>
                         <button className="rot-btn" onClick={() => applyMove(s.task.id, s.from, null)} style={{ marginLeft: "auto", padding: "7px 12px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, cursor: "pointer", fontSize: 12.5, color: C.sub }}>
-                          Pular esta semana
+                          Não precisou esta semana
                         </button>
                       </div>
                     </div>
@@ -770,6 +869,55 @@ function ApptAdder({ onAdd, C, PEOPLE }) {
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={() => { if (title.trim()) { onAdd({ title: title.trim(), when, who, day }); reset(); } }}
           style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", background: "#26251F", color: "#fff", fontSize: 13, fontWeight: 500, cursor: "pointer" }}>Salvar</button>
+        <button onClick={reset} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, color: C.sub, fontSize: 13, cursor: "pointer" }}>Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+// Atividade avulsa: acontece só num dia desta semana, não vira rotina.
+function ExtraAdder({ onAdd, C, PEOPLE, ti }) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [who, setWho] = useState("rafa");
+  const [cat, setCat] = useState("vida");
+  const [day, setDay] = useState(ti);
+  const reset = () => { setTitle(""); setCat("vida"); setDay(ti); setOpen(false); };
+  if (!open) return (
+    <button className="rot-btn" onClick={() => { setDay(ti); setOpen(true); }}
+      style={{ display: "flex", alignItems: "center", gap: 6, padding: "11px 14px", borderRadius: 12, border: `1px dashed ${C.line2}`, background: C.surface, cursor: "pointer", fontSize: 13, color: C.sub, marginTop: 16, width: "100%", justifyContent: "center" }}>
+      <Plus size={15} /> Atividade avulsa (só hoje/num dia)
+    </button>
+  );
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 14, padding: 14, marginTop: 16 }}>
+      <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="ex: levar o gato no vet, comprar presente"
+        style={{ width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 9, border: `1px solid ${C.line}`, fontSize: 13.5, outline: "none", marginBottom: 12 }} />
+
+      <Label C={C}>De quem é?</Label>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {Object.entries(PEOPLE).map(([k, p]) => (
+          <button key={k} onClick={() => setWho(k)} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${who === k ? p.color : C.line}`, background: who === k ? p.soft : C.surface, color: who === k ? p.color : C.sub, fontWeight: who === k ? 500 : 400 }}>{p.name}</button>
+        ))}
+      </div>
+
+      <Label C={C}>Categoria</Label>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {Object.entries(CATEGORIES).map(([k, c]) => (
+          <button key={k} onClick={() => setCat(k)} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${cat === k ? c.color : C.line}`, background: cat === k ? c.soft : C.surface, color: cat === k ? c.color : C.sub, fontWeight: cat === k ? 500 : 400 }}>{c.label}</button>
+        ))}
+      </div>
+
+      <Label C={C}>Em que dia?</Label>
+      <div style={{ display: "flex", gap: 5, marginBottom: 12, flexWrap: "wrap" }}>
+        {DAYS.map((d, i) => (
+          <button key={d} onClick={() => setDay(i)} style={{ flex: "1 0 auto", minWidth: 38, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${day === i ? C.accent : C.line}`, background: day === i ? "#EEEDFB" : C.surface, color: day === i ? C.accent : C.sub, fontWeight: day === i ? 500 : 400 }}>{d}</button>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => { if (title.trim()) { onAdd({ title: title.trim(), who, cat, day }); reset(); } }}
+          style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", background: "#26251F", color: "#fff", fontSize: 13, fontWeight: 500, cursor: "pointer" }}>Adicionar</button>
         <button onClick={reset} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, color: C.sub, fontSize: 13, cursor: "pointer" }}>Cancelar</button>
       </div>
     </div>
