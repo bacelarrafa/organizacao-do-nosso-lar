@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import {
   Home, Calendar, Check, Plus, Trash2, Briefcase, Utensils, HeartPulse,
   RefreshCw, ChevronLeft, ChevronRight, User, X, Flame, TrendingUp,
-  Stethoscope, Lightbulb, ArrowRight, Pencil, LogOut, Heart, CircleSlash, MoreHorizontal
+  Stethoscope, Lightbulb, ArrowRight, Pencil, LogOut, Heart, CircleSlash, MoreHorizontal, Cat
 } from "lucide-react";
 
 const SEED_PEOPLE = {
@@ -26,6 +26,7 @@ const DAY_FULL = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "
 const CATEGORIES = {
   casa: { label: "Casa", icon: Home, color: "#4F46A8", soft: "#EEEDFB" },
   saude: { label: "Saúde", icon: HeartPulse, color: "#C04574", soft: "#FBEAF1" },
+  gatos: { label: "Gatos", icon: Cat, color: "#2F8F83", soft: "#E3F1EF" },
   vida: { label: "Vida", icon: Utensils, color: "#B06A2C", soft: "#FAF0E4" },
 };
 
@@ -100,11 +101,41 @@ function withNewVersion(t, fromDate, fields) {
     versions = t.versions.filter((v) => (v.from || "0000-00-00") !== fromDate);
   } else {
     // converte a tarefa flat em versionada, mantendo o passado
-    versions = [{ from: "0000-00-00", title: t.title, cat: t.cat, who: t.who, days: t.days, flexible: !!t.flexible }];
+    versions = [{ from: "0000-00-00", title: t.title, cat: t.cat, who: t.who, days: t.days, flexible: !!t.flexible, freq: t.freq || "semanal" }];
   }
   versions.push({ from: fromDate, ...fields });
   versions.sort((a, b) => (a.from || "0000-00-00").localeCompare(b.from || "0000-00-00"));
   return { id: t.id, versions };
+}
+
+// Segunda-feira (âncora da semana) de uma data qualquer.
+function mondayStrOf(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  const js = d.getDay();
+  const diff = js === 0 ? -6 : 1 - js;
+  d.setDate(d.getDate() + diff);
+  return isoDate(d);
+}
+function weeksApart(aMon, bMon) {
+  return Math.round((new Date(bMon + "T00:00:00") - new Date(aMon + "T00:00:00")) / (7 * 86400000));
+}
+// A tarefa está agendada no dia i da semana que começa em "monday"?
+// Considera versão por data + frequência (semanal / quinzenal / mensal).
+function isScheduledOn(t, monday, i) {
+  const dateStr = addDays(monday, i);
+  if (dateStr < firstFrom(t)) return false;
+  const v = verOf(t, dateStr);
+  if (!v.days || !v.days.includes(i)) return false;
+  const freq = v.freq || "semanal";
+  if (freq === "semanal") return true;
+  // mensal: só a 1ª ocorrência daquele dia da semana no mês (dia do mês <= 7)
+  if (freq === "mensal") return new Date(dateStr + "T00:00:00").getDate() <= 7;
+  // quinzenal: a cada 2 semanas, ancorado na semana em que a versão começou
+  if (freq === "quinzenal") {
+    const anchor = (v.from && v.from !== "0000-00-00") ? mondayStrOf(v.from) : monday;
+    return weeksApart(anchor, monday) % 2 === 0;
+  }
+  return true;
 }
 
 import { supabase } from "./supabaseClient";
@@ -241,16 +272,12 @@ function Routine() {
   // A tarefa já existe (foi criada) até esta semana?
   const activeInWeek = useCallback((t) => firstFrom(t) <= addDays(wid, 6), [wid]);
 
-  // Dias em que a tarefa está agendada nesta semana (considera versão por dia + remanejo)
+  // Dias em que a tarefa está agendada nesta semana (versão por dia + frequência + remanejo)
   const effectiveDays = useCallback((t) => {
     const moved = week.move[t.id];
     if (moved && moved.length) return moved;
     const out = [];
-    for (let i = 0; i < 7; i++) {
-      const dateStr = addDays(wid, i);
-      if (dateStr < firstFrom(t)) continue;
-      if (verOf(t, dateStr).days.includes(i)) out.push(i);
-    }
+    for (let i = 0; i < 7; i++) if (isScheduledOn(t, wid, i)) out.push(i);
     return out;
   }, [week, wid]);
 
@@ -354,9 +381,7 @@ function Routine() {
       let tot = 0, dn = 0;
       templates.forEach((t) => {
         for (let i = 0; i < 7; i++) {
-          const dateStr = addDays(wDate, i);
-          if (dateStr < firstFrom(t)) continue;
-          if (!verOf(t, dateStr).days.includes(i)) continue;
+          if (!isScheduledOn(t, wDate, i)) continue;
           if (w.skip?.[`${t.id}:${i}`]) continue;
           tot++;
           if (w.done?.[`${t.id}:${i}`]) dn++;
@@ -633,7 +658,7 @@ function Routine() {
               </thead>
               <tbody>
                 {["rafa", "lucas", "both"].map((pk) => {
-                  const items = templates.filter((t) => activeInWeek(t) && rowVer(t).who === pk);
+                  const items = templates.filter((t) => activeInWeek(t) && rowVer(t).who === pk && effectiveDays(t).length > 0);
                   const extrasFor = (week.extras || []).filter((e) => e.who === pk);
                   if (!items.length && !extrasFor.length) return null;
                   const pp = PEOPLE[pk];
@@ -888,7 +913,7 @@ function Routine() {
       {tab === "historico" && (
         <div style={{ animation: "fade .25s ease" }}>
           <p style={{ fontSize: 13.5, color: C.sub, lineHeight: 1.55, margin: "0 0 16px" }}>Como as últimas semanas foram. Use para enxergar padrões — por exemplo, semanas com muitos dias presenciais costumam render menos em casa.</p>
-          <HistoryView weeks={weeks} templates={templates} C={C} />
+          <HistoryView weeks={weeks} templates={templates} C={C} PEOPLE={PEOPLE} />
         </div>
       )}
 
@@ -1017,7 +1042,7 @@ function ExtraAdder({ onAdd, C, PEOPLE, ti }) {
   );
 }
 
-function HistoryView({ weeks, templates, C }) {
+function HistoryView({ weeks, templates, C, PEOPLE }) {
   const rows = useMemo(() => {
     const out = [];
     for (let o = -1; o >= -12; o--) {
@@ -1025,21 +1050,29 @@ function HistoryView({ weeks, templates, C }) {
       const w = weeks[id];
       if (!w) continue;
       let tot = 0, dn = 0;
+      const cheer = { rafa: 0, lucas: 0, both: 0 };
       templates.forEach((t) => {
         for (let i = 0; i < 7; i++) {
-          const dateStr = addDays(id, i);
-          if (dateStr < firstFrom(t)) continue;
-          if (!verOf(t, dateStr).days.includes(i)) continue;
+          if (!isScheduledOn(t, id, i)) continue;
           if (w.skip?.[`${t.id}:${i}`]) continue;
           tot++;
-          if (w.done?.[`${t.id}:${i}`]) dn++;
+          if (w.done?.[`${t.id}:${i}`]) {
+            dn++;
+            const who = (w.assign && w.assign[`${t.id}:${i}`]) || verOf(t, addDays(id, i)).who;
+            cheer[who] = (cheer[who] || 0) + 1;
+          }
         }
       });
+      (w.extras || []).forEach((e) => {
+        if (w.done?.[`${e.id}:${e.day}`]) cheer[e.who] = (cheer[e.who] || 0) + 1;
+      });
       const presDays = (w.presence?.rafa?.length || 0) + (w.presence?.lucas?.length || 0);
-      out.push({ id, label: weekLabel(o).range, pct: tot ? Math.round((dn / tot) * 100) : 0, dn, tot, presDays, wins: w.wins });
+      out.push({ id, label: weekLabel(o).range, pct: tot ? Math.round((dn / tot) * 100) : 0, dn, tot, presDays, wins: w.wins, cheer });
     }
     return out;
   }, [weeks, templates]);
+
+  const order = ["rafa", "lucas", "both"];
 
   if (rows.length === 0) {
     return <div style={{ textAlign: "center", padding: "40px 0", color: C.faint, fontSize: 13.5 }}>O histórico aparece aqui assim que vocês fecharem a primeira semana.</div>;
@@ -1059,6 +1092,21 @@ function HistoryView({ weeks, templates, C }) {
             <span>{r.dn}/{r.tot} tarefas</span>
             <span>· {r.presDays} dias presenciais</span>
           </div>
+          {(r.cheer.rafa + r.cheer.lucas + r.cheer.both) > 0 && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
+              <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 6, letterSpacing: 0.2 }}>QUEM CUIDOU DA CASA</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {order.map((k) => r.cheer[k] > 0 && (
+                  <span key={k} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, padding: "3px 9px", borderRadius: 99, background: PEOPLE[k].soft, color: PEOPLE[k].color }}>
+                    <Heart size={10} /> {PEOPLE[k].name} · {r.cheer[k]}
+                  </span>
+                ))}
+              </div>
+              {r.cheer.rafa > 0 && r.cheer.lucas > 0 && (
+                <div style={{ fontSize: 11.5, color: C.sub, marginTop: 7 }}>Casa cuidada a quatro mãos 💛</div>
+              )}
+            </div>
+          )}
           {r.wins && <div style={{ fontSize: 12.5, color: C.sub, marginTop: 8, lineHeight: 1.5, fontStyle: "italic" }}>"{r.wins}"</div>}
         </div>
       ))}
@@ -1067,18 +1115,18 @@ function HistoryView({ weeks, templates, C }) {
 }
 
 function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, setPeopleRaw }) {
-  const blank = { title: "", cat: "casa", who: "both", days: [ti], flexible: false };
+  const blank = { title: "", cat: "casa", who: "both", days: [ti], flexible: false, freq: "semanal" };
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [draft, setDraft] = useState(blank);
 
   const openNew = () => { setEditingId(null); setDraft(blank); setAdding(true); };
-  const openEdit = (t) => { const v = verOf(t, todayStr()); setEditingId(t.id); setDraft({ title: v.title, cat: v.cat, who: v.who, days: [...v.days], flexible: !!v.flexible }); setAdding(true); };
+  const openEdit = (t) => { const v = verOf(t, todayStr()); setEditingId(t.id); setDraft({ title: v.title, cat: v.cat, who: v.who, days: [...v.days], flexible: !!v.flexible, freq: v.freq || "semanal" }); setAdding(true); };
   const closeForm = () => { setAdding(false); setEditingId(null); setDraft(blank); };
 
   const save = () => {
     if (!draft.title.trim() || draft.days.length === 0) return;
-    const fields = { title: draft.title.trim(), cat: draft.cat, who: draft.who, days: draft.days, flexible: draft.flexible };
+    const fields = { title: draft.title.trim(), cat: draft.cat, who: draft.who, days: draft.days, flexible: draft.flexible, freq: draft.freq || "semanal" };
     if (editingId) {
       // versionamento: a alteração vale a partir de hoje; o histórico anterior fica preservado
       setTemplates(templates.map((t) => t.id === editingId ? withNewVersion(t, todayStr(), fields) : t));
@@ -1123,7 +1171,15 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
             })}
           </div>
 
-          <Label C={C}>Quais dias?</Label>
+          <Label C={C}>Frequência</Label>
+          <div style={{ display: "flex", gap: 6, marginBottom: 13 }}>
+            {[["semanal", "Toda semana"], ["quinzenal", "A cada 2 semanas"], ["mensal", "1x no mês"]].map(([k, lbl]) => {
+              const on = (draft.freq || "semanal") === k;
+              return <button key={k} onClick={() => setDraft({ ...draft, freq: k })} style={{ flex: 1, padding: "7px 4px", borderRadius: 9, fontSize: 11.5, cursor: "pointer", border: `1px solid ${on ? C.accent : C.line}`, background: on ? "#EEEDFB" : C.surface, color: on ? C.accent : C.sub, fontWeight: on ? 500 : 400 }}>{lbl}</button>;
+            })}
+          </div>
+
+          <Label C={C}>{draft.freq === "mensal" ? "Qual dia da semana? (1ª vez no mês)" : draft.freq === "quinzenal" ? "Quais dias? (a cada 2 semanas)" : "Quais dias?"}</Label>
           <div style={{ display: "flex", gap: 5, marginBottom: 13 }}>
             {DAYS.map((d, i) => {
               const on = draft.days.includes(i);
@@ -1160,9 +1216,10 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
                     <div key={t.id} className="rot-row" onClick={() => openEdit(t)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: C.surface, border: `1px solid ${isEd ? C.accent : C.line}`, borderRadius: 11, cursor: "pointer" }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 13.5, display: "flex", alignItems: "center", gap: 6 }}>{cv.title}{cv.flexible && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 5, background: softOf(PEOPLE.both.color), color: PEOPLE.both.color }}>flexível</span>}</div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4, flexWrap: "wrap" }}>
                           <Tag soft={p.soft} color={p.color}>{p.name}</Tag>
                           <span style={{ fontSize: 11.5, color: C.faint }}>{cv.days.map((d) => DAYS[d]).join(", ")}</span>
+                          {cv.freq && cv.freq !== "semanal" && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 5, background: "#F1F0EC", color: C.faint }}>{cv.freq === "quinzenal" ? "quinzenal" : "mensal"}</span>}
                         </div>
                       </div>
                       <button className="rot-btn" onClick={(e) => { e.stopPropagation(); openEdit(t); }} style={{ ...iconBtn, width: 32, height: 32, border: "none" }} aria-label="Editar"><Pencil size={14} color="#9B9A94" /></button>
