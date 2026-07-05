@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import {
   Home, Calendar, Check, Plus, Trash2, Briefcase, Utensils, HeartPulse,
   RefreshCw, ChevronLeft, ChevronRight, User, X, Flame, TrendingUp,
-  Stethoscope, Lightbulb, ArrowRight, Pencil, LogOut, Heart, CircleSlash
+  Stethoscope, Lightbulb, ArrowRight, Pencil, LogOut, Heart, CircleSlash, MoreHorizontal
 } from "lucide-react";
 
 const SEED_PEOPLE = {
@@ -65,6 +65,46 @@ function weekLabel(offset) {
   const fmt = (x) => `${x.getDate()}/${x.getMonth() + 1}`;
   const rel = offset === 0 ? "Esta semana" : offset === 1 ? "Próxima" : offset === -1 ? "Semana passada" : null;
   return { range: `${fmt(s)} – ${fmt(e)}`, rel };
+}
+
+// ---- Versionamento por data ----
+// Uma tarefa pode ter várias "versões" com uma data "from" (a partir de quando valem).
+// Assim, mudar quem/dias vale só daqui pra frente, e o histórico antigo fica preservado.
+// Tarefas antigas (sem "versions") são tratadas como uma versão desde sempre.
+function isoDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return isoDate(d);
+}
+function todayStr() {
+  return isoDate(new Date());
+}
+function firstFrom(t) {
+  if (!t.versions || !t.versions.length) return "0000-00-00";
+  return t.versions[0].from || "0000-00-00";
+}
+// A versão de uma tarefa efetiva numa data (a última cujo "from" <= data).
+function verOf(t, dateStr) {
+  if (!t.versions || !t.versions.length) return t; // tarefa flat = uma versão desde sempre
+  let chosen = t.versions[0];
+  for (const v of t.versions) { if ((v.from || "0000-00-00") <= dateStr) chosen = v; }
+  return chosen;
+}
+// Cria/atualiza uma versão a partir de uma data, preservando as anteriores.
+function withNewVersion(t, fromDate, fields) {
+  let versions;
+  if (t.versions && t.versions.length) {
+    versions = t.versions.filter((v) => (v.from || "0000-00-00") !== fromDate);
+  } else {
+    // converte a tarefa flat em versionada, mantendo o passado
+    versions = [{ from: "0000-00-00", title: t.title, cat: t.cat, who: t.who, days: t.days, flexible: !!t.flexible }];
+  }
+  versions.push({ from: fromDate, ...fields });
+  versions.sort((a, b) => (a.from || "0000-00-00").localeCompare(b.from || "0000-00-00"));
+  return { id: t.id, versions };
 }
 
 import { supabase } from "./supabaseClient";
@@ -170,6 +210,7 @@ export default function App() {
 function Routine() {
   const code = HOUSEHOLD_CODE;
   const [tab, setTab] = useState("hoje");
+  const [openActions, setOpenActions] = useState(null); // id da tarefa com o painel "só hoje" aberto
   const [offset, setOffset] = useState(0);
   useEffect(() => { if (tab === "hoje" && offset !== 0) setOffset(0); }, [tab, offset]);
   const wid = weekId(offset);
@@ -183,25 +224,47 @@ function Routine() {
     return out;
   }, [peopleRaw]);
 
-  const week = weeks[wid] || { done: {}, presence: {}, skip: {}, move: {}, meals: {}, appts: [], wins: "" };
+  const week = weeks[wid] || { done: {}, presence: {}, skip: {}, move: {}, meals: {}, appts: [], wins: "", extras: [], assign: {} };
 
 
   const patchWeek = useCallback((patch) => {
     setWeeks((prev) => {
-      const cur = prev[wid] || { done: {}, presence: {}, skip: {}, move: {}, meals: {}, appts: [], wins: "" };
+      const cur = prev[wid] || { done: {}, presence: {}, skip: {}, move: {}, meals: {}, appts: [], wins: "", extras: [], assign: {} };
       return { ...prev, [wid]: { ...cur, ...patch } };
     });
   }, [wid, setWeeks]);
 
-  // Effective day for a task this week (move overrides shift it)
+  // Versão efetiva de uma tarefa num dia (i) da semana exibida (wid)
+  const verAt = useCallback((t, i) => verOf(t, addDays(wid, i)), [wid]);
+  // Versão de referência da semana (fim da semana) — usada para agrupar/rotular a linha
+  const rowVer = useCallback((t) => verOf(t, addDays(wid, 6)), [wid]);
+  // A tarefa já existe (foi criada) até esta semana?
+  const activeInWeek = useCallback((t) => firstFrom(t) <= addDays(wid, 6), [wid]);
+
+  // Dias em que a tarefa está agendada nesta semana (considera versão por dia + remanejo)
   const effectiveDays = useCallback((t) => {
     const moved = week.move[t.id];
     if (moved && moved.length) return moved;
-    return t.days;
-  }, [week]);
+    const out = [];
+    for (let i = 0; i < 7; i++) {
+      const dateStr = addDays(wid, i);
+      if (dateStr < firstFrom(t)) continue;
+      if (verOf(t, dateStr).days.includes(i)) out.push(i);
+    }
+    return out;
+  }, [week, wid]);
 
   const isDone = (t, d) => !!week.done[`${t.id}:${d}`];
   const isSkipped = (t, d) => !!week.skip[`${t.id}:${d}`];
+
+  // Efetivo "de quem é" a tarefa num dia (transferência só daquele dia sobrepõe a versão)
+  const assignFor = (t, d) => (week.assign && week.assign[`${t.id}:${d}`]) || verAt(t, d).who;
+  const setAssign = (t, d, who) => {
+    const k = `${t.id}:${d}`;
+    const next = { ...(week.assign || {}) };
+    if (who === verAt(t, d).who) delete next[k]; else next[k] = who;
+    patchWeek({ assign: next });
+  };
 
   const toggleDone = (t, d) => {
     const k = `${t.id}:${d}`;
@@ -237,10 +300,10 @@ function Routine() {
     const lucasOut = week.presence.lucas || [];
     const bothHome = (d) => !rafaOut.includes(d) && !lucasOut.includes(d);
     templates.forEach((t) => {
-      if (!t.flexible) return;
+      if (!rowVer(t).flexible) return;
       const days = effectiveDays(t);
       days.forEach((d) => {
-        const needsBoth = t.who === "both";
+        const needsBoth = verAt(t, d).who === "both";
         const clash = needsBoth ? (rafaOut.includes(d) || lucasOut.includes(d)) : false;
         if (!clash) return;
         const whoOut = [];
@@ -285,10 +348,20 @@ function Routine() {
   const streak = useMemo(() => {
     let s = 0;
     for (let o = -1; o >= -52; o--) {
-      const w = weeks[weekId(o)];
+      const wDate = weekId(o);
+      const w = weeks[wDate];
       if (!w) break;
       let tot = 0, dn = 0;
-      templates.forEach((t) => t.days.forEach((d) => { tot++; if (w.done?.[`${t.id}:${d}`]) dn++; }));
+      templates.forEach((t) => {
+        for (let i = 0; i < 7; i++) {
+          const dateStr = addDays(wDate, i);
+          if (dateStr < firstFrom(t)) continue;
+          if (!verOf(t, dateStr).days.includes(i)) continue;
+          if (w.skip?.[`${t.id}:${i}`]) continue;
+          tot++;
+          if (w.done?.[`${t.id}:${i}`]) dn++;
+        }
+      });
       if (tot && dn / tot >= 0.7) s++; else break;
     }
     return s;
@@ -420,7 +493,7 @@ function Routine() {
             const dayAppts = (week.appts || []).filter((a) => a.day === ti);
             const groups = order.map((pk) => ({
               pk,
-              tasks: todayTasks.filter((t) => t.who === pk),
+              tasks: todayTasks.filter((t) => assignFor(t, ti) === pk),
               extras: todayExtras.filter((e) => e.who === pk),
               appts: dayAppts.filter((a) => a.who === pk),
             })).filter((g) => g.tasks.length || g.extras.length || g.appts.length);
@@ -443,7 +516,7 @@ function Routine() {
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         {g.tasks.map((t) => {
                           const done = isDone(t, ti); const skipped = isSkipped(t, ti);
-                          const cat = CATEGORIES[t.cat]; const Ic = cat.icon;
+                          const v = verAt(t, ti); const cat = CATEGORIES[v.cat]; const Ic = cat.icon;
                           if (skipped) {
                             return (
                               <div key={t.id} className="rot-row"
@@ -452,7 +525,7 @@ function Routine() {
                                   <CircleSlash size={13} color={C.faint} />
                                 </div>
                                 <div onClick={() => toggleSkip(t, ti)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
-                                  <div style={{ fontSize: 14.5, textDecoration: "line-through", color: C.sub }}>{t.title}</div>
+                                  <div style={{ fontSize: 14.5, textDecoration: "line-through", color: C.sub }}>{v.title}</div>
                                   <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                                     <Tag soft="#F1F0EC" color={C.faint}>não precisou</Tag>
                                   </div>
@@ -462,18 +535,38 @@ function Routine() {
                             );
                           }
                           return (
-                            <div key={t.id} className="rot-row"
-                              style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", opacity: done ? 0.55 : 1, transition: "opacity .15s, border-color .15s" }}>
-                              <div onClick={() => toggleDone(t, ti)} style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
-                                {done && <Check size={13} color="#fff" />}
-                              </div>
-                              <div onClick={() => toggleDone(t, ti)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
-                                <div style={{ fontSize: 14.5, textDecoration: done ? "line-through" : "none" }}>{t.title}</div>
-                                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-                                  <Tag soft={cat.soft} color={cat.color}><Ic size={11} /> {cat.label}</Tag>
+                            <div key={t.id}>
+                              <div className="rot-row"
+                                style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", opacity: done ? 0.55 : 1, transition: "opacity .15s, border-color .15s", ...(openActions === t.id ? { borderBottomLeftRadius: 0, borderBottomRightRadius: 0 } : {}) }}>
+                                <div onClick={() => toggleDone(t, ti)} style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
+                                  {done && <Check size={13} color="#fff" />}
                                 </div>
+                                <div onClick={() => toggleDone(t, ti)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                                  <div style={{ fontSize: 14.5, textDecoration: done ? "line-through" : "none" }}>{v.title}</div>
+                                  <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                                    <Tag soft={cat.soft} color={cat.color}><Ic size={11} /> {cat.label}</Tag>
+                                    {assignFor(t, ti) !== v.who && <Tag soft="#F1F0EC" color={C.faint}>só hoje</Tag>}
+                                  </div>
+                                </div>
+                                <button onClick={() => setOpenActions(openActions === t.id ? null : t.id)} title="Ações de hoje" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0, background: openActions === t.id ? "#F1F0EC" : "transparent" }}><MoreHorizontal size={16} color={C.faint} /></button>
                               </div>
-                              <button onClick={() => toggleSkip(t, ti)} title="Não precisou esta semana" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0 }}><CircleSlash size={15} color={C.faint} /></button>
+                              {openActions === t.id && (
+                                <div style={{ background: "#F7F6F3", border: `1px solid ${C.line}`, borderTop: "none", borderBottomLeftRadius: 12, borderBottomRightRadius: 12, padding: "12px 14px" }}>
+                                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>Passar hoje para</div>
+                                  <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                                    {["rafa", "lucas", "both"].map((k) => { const on = assignFor(t, ti) === k; const pp = PEOPLE[k]; return (
+                                      <button key={k} onClick={() => { setAssign(t, ti, k); setOpenActions(null); }} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${on ? pp.color : C.line}`, background: on ? pp.soft : C.surface, color: on ? pp.color : C.sub, fontWeight: on ? 500 : 400 }}>{pp.name}</button>
+                                    ); })}
+                                  </div>
+                                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>Jogar para outro dia</div>
+                                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 12 }}>
+                                    {DAYS.map((d, i) => { const isToday = i === ti; return (
+                                      <button key={d} disabled={isToday} onClick={() => { applyMove(t.id, ti, i); setOpenActions(null); }} title={isToday ? "hoje" : `mover para ${DAY_FULL[i]}`} style={{ flex: "1 0 auto", minWidth: 38, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: isToday ? "default" : "pointer", opacity: isToday ? 0.5 : 1, border: `1px solid ${C.line}`, background: isToday ? "#EEEDE9" : C.surface, color: isToday ? C.faint : C.sub }}>{d}</button>
+                                    ); })}
+                                  </div>
+                                  <button onClick={() => { toggleSkip(t, ti); setOpenActions(null); }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, cursor: "pointer", fontSize: 12.5, color: C.sub }}><CircleSlash size={13} /> Não precisou esta semana</button>
+                                </div>
+                              )}
                             </div>
                           );
                         })}
@@ -540,7 +633,7 @@ function Routine() {
               </thead>
               <tbody>
                 {["rafa", "lucas", "both"].map((pk) => {
-                  const items = templates.filter((t) => t.who === pk);
+                  const items = templates.filter((t) => activeInWeek(t) && rowVer(t).who === pk);
                   const extrasFor = (week.extras || []).filter((e) => e.who === pk);
                   if (!items.length && !extrasFor.length) return null;
                   const pp = PEOPLE[pk];
@@ -554,13 +647,13 @@ function Routine() {
                         </td>
                       </tr>
                       {items.map((t) => {
-                        const cat = CATEGORIES[t.cat]; const days = effectiveDays(t);
+                        const rv = rowVer(t); const cat = CATEGORIES[rv.cat]; const days = effectiveDays(t);
                         const moved = !!week.move[t.id];
                         return (
                           <tr key={t.id} style={{ borderTop: `1px solid ${C.line}` }}>
                             <td style={{ padding: "9px 8px 9px 0" }}>
                               <div style={{ fontSize: 12.5, lineHeight: 1.3, paddingLeft: 14 }}>
-                                {t.title}
+                                {rv.title}
                                 {moved && <span style={{ fontSize: 10, color: "#B06A2C" }}> · ajustada</span>}
                               </div>
                             </td>
@@ -932,11 +1025,16 @@ function HistoryView({ weeks, templates, C }) {
       const w = weeks[id];
       if (!w) continue;
       let tot = 0, dn = 0;
-      const by = { rafa: 0, lucas: 0, both: 0 };
-      templates.forEach((t) => t.days.forEach((d) => {
-        tot++;
-        if (w.done?.[`${t.id}:${d}`]) { dn++; by[t.who]++; }
-      }));
+      templates.forEach((t) => {
+        for (let i = 0; i < 7; i++) {
+          const dateStr = addDays(id, i);
+          if (dateStr < firstFrom(t)) continue;
+          if (!verOf(t, dateStr).days.includes(i)) continue;
+          if (w.skip?.[`${t.id}:${i}`]) continue;
+          tot++;
+          if (w.done?.[`${t.id}:${i}`]) dn++;
+        }
+      });
       const presDays = (w.presence?.rafa?.length || 0) + (w.presence?.lucas?.length || 0);
       out.push({ id, label: weekLabel(o).range, pct: tot ? Math.round((dn / tot) * 100) : 0, dn, tot, presDays, wins: w.wins });
     }
@@ -975,15 +1073,17 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
   const [draft, setDraft] = useState(blank);
 
   const openNew = () => { setEditingId(null); setDraft(blank); setAdding(true); };
-  const openEdit = (t) => { setEditingId(t.id); setDraft({ title: t.title, cat: t.cat, who: t.who, days: [...t.days], flexible: !!t.flexible }); setAdding(true); };
+  const openEdit = (t) => { const v = verOf(t, todayStr()); setEditingId(t.id); setDraft({ title: v.title, cat: v.cat, who: v.who, days: [...v.days], flexible: !!v.flexible }); setAdding(true); };
   const closeForm = () => { setAdding(false); setEditingId(null); setDraft(blank); };
 
   const save = () => {
     if (!draft.title.trim() || draft.days.length === 0) return;
+    const fields = { title: draft.title.trim(), cat: draft.cat, who: draft.who, days: draft.days, flexible: draft.flexible };
     if (editingId) {
-      setTemplates(templates.map((t) => t.id === editingId ? { ...t, ...draft, title: draft.title.trim() } : t));
+      // versionamento: a alteração vale a partir de hoje; o histórico anterior fica preservado
+      setTemplates(templates.map((t) => t.id === editingId ? withNewVersion(t, todayStr(), fields) : t));
     } else {
-      setTemplates([...templates, { ...draft, id: "u" + Date.now(), title: draft.title.trim() }]);
+      setTemplates([...templates, { id: "u" + Date.now(), versions: [{ from: todayStr(), ...fields }] }]);
     }
     closeForm();
   };
@@ -1047,7 +1147,7 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
 
       <div style={{ marginTop: 14 }}>
         {Object.entries(CATEGORIES).map(([ck, cat]) => {
-          const group = templates.filter((t) => t.cat === ck);
+          const group = templates.filter((t) => verOf(t, todayStr()).cat === ck);
           if (!group.length) return null;
           const Ic = cat.icon;
           return (
@@ -1055,14 +1155,14 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}><Ic size={13} color={cat.color} /><span style={{ fontSize: 12, fontWeight: 500, color: cat.color }}>{cat.label}</span></div>
               <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                 {group.map((t) => {
-                  const p = PEOPLE[t.who]; const isEd = editingId === t.id;
+                  const cv = verOf(t, todayStr()); const p = PEOPLE[cv.who]; const isEd = editingId === t.id;
                   return (
                     <div key={t.id} className="rot-row" onClick={() => openEdit(t)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: C.surface, border: `1px solid ${isEd ? C.accent : C.line}`, borderRadius: 11, cursor: "pointer" }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13.5, display: "flex", alignItems: "center", gap: 6 }}>{t.title}{t.flexible && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 5, background: softOf(PEOPLE.both.color), color: PEOPLE.both.color }}>flexível</span>}</div>
+                        <div style={{ fontSize: 13.5, display: "flex", alignItems: "center", gap: 6 }}>{cv.title}{cv.flexible && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 5, background: softOf(PEOPLE.both.color), color: PEOPLE.both.color }}>flexível</span>}</div>
                         <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4 }}>
                           <Tag soft={p.soft} color={p.color}>{p.name}</Tag>
-                          <span style={{ fontSize: 11.5, color: C.faint }}>{t.days.map((d) => DAYS[d]).join(", ")}</span>
+                          <span style={{ fontSize: 11.5, color: C.faint }}>{cv.days.map((d) => DAYS[d]).join(", ")}</span>
                         </div>
                       </div>
                       <button className="rot-btn" onClick={(e) => { e.stopPropagation(); openEdit(t); }} style={{ ...iconBtn, width: 32, height: 32, border: "none" }} aria-label="Editar"><Pencil size={14} color="#9B9A94" /></button>
@@ -1123,4 +1223,3 @@ function PeopleEditor({ peopleRaw, setPeopleRaw, C }) {
 function Label({ children, C }) {
   return <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 7 }}>{children}</div>;
 }
-
