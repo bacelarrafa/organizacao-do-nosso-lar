@@ -139,12 +139,13 @@ function isScheduledOn(t, monday, i) {
 }
 
 import { supabase } from "./supabaseClient";
+import Recolocacao from "./Recolocacao";
 
 // One household row holds everything. We load it once, subscribe to
 // realtime changes (so the other person's edits appear live), and
 // write back debounced. The shape mirrors the original three blobs:
 // { templates, weeks, people }.
-const EMPTY = { templates: SEED_TEMPLATES, weeks: {}, people: SEED_PEOPLE };
+const EMPTY = { templates: SEED_TEMPLATES, weeks: {}, people: SEED_PEOPLE, jobsearch: {} };
 
 function useHousehold(code) {
   const [data, setData] = useState(EMPTY);
@@ -166,7 +167,7 @@ function useHousehold(code) {
         if (!row) {
           // first time this code is used — create it seeded
           const { error: insErr } = await supabase.from("households").insert({
-            code, templates: SEED_TEMPLATES, weeks: {}, people: SEED_PEOPLE,
+            code, templates: SEED_TEMPLATES, weeks: {}, people: SEED_PEOPLE, jobsearch: {},
           });
           if (insErr) throw insErr;
           setData(EMPTY);
@@ -175,6 +176,7 @@ function useHousehold(code) {
             templates: row.templates?.length ? row.templates : SEED_TEMPLATES,
             weeks: row.weeks || {},
             people: row.people && Object.keys(row.people).length ? row.people : SEED_PEOPLE,
+            jobsearch: row.jobsearch || {},
           });
         }
         setLoaded(true);
@@ -194,6 +196,7 @@ function useHousehold(code) {
             templates: r.templates || SEED_TEMPLATES,
             weeks: r.weeks || {},
             people: r.people && Object.keys(r.people).length ? r.people : SEED_PEOPLE,
+            jobsearch: r.jobsearch || {},
           });
         })
       .subscribe();
@@ -206,7 +209,7 @@ function useHousehold(code) {
     saveTimer.current = setTimeout(async () => {
       skipNextRealtime.current = true;
       const { error: upErr } = await supabase.from("households")
-        .update({ templates: next.templates, weeks: next.weeks, people: next.people })
+        .update({ templates: next.templates, weeks: next.weeks, people: next.people, jobsearch: next.jobsearch })
         .eq("code", code);
       if (upErr) setError(upErr.message);
     }, 500);
@@ -225,6 +228,7 @@ function useHousehold(code) {
     templates: data.templates, setTemplates: makeSetter("templates"),
     weeks: data.weeks, setWeeks: makeSetter("weeks"),
     peopleRaw: data.people, setPeopleRaw: makeSetter("people"),
+    jobsearch: data.jobsearch, setJobsearch: makeSetter("jobsearch"),
     loaded, error,
   };
 }
@@ -247,7 +251,7 @@ function Routine() {
   const wid = weekId(offset);
   const ti = todayIdx();
 
-  const { templates, setTemplates, weeks, setWeeks, peopleRaw, setPeopleRaw, loaded, error } = useHousehold(code);
+  const { templates, setTemplates, weeks, setWeeks, peopleRaw, setPeopleRaw, jobsearch, setJobsearch, loaded, error } = useHousehold(code);
 
   const PEOPLE = useMemo(() => {
     const out = {};
@@ -433,6 +437,7 @@ function Routine() {
     { id: "saude", label: "Saúde & vida", icon: HeartPulse },
     { id: "historico", label: "Histórico", icon: TrendingUp },
     { id: "rotina", label: "Rotina", icon: Home },
+    { id: "vagas", label: "Recolocação", icon: Briefcase },
   ];
 
   const card = { background: C.surface, border: `1px solid ${C.line}`, borderRadius: 14 };
@@ -493,6 +498,11 @@ function Routine() {
           </div>
           <button className="rot-btn" onClick={() => setOffset(offset + 1)} style={{ ...iconBtn }}><ChevronRight size={18} /></button>
         </div>
+      )}
+
+      {/* ---------- RECOLOCAÇÃO ---------- */}
+      {tab === "vagas" && (
+        <Recolocacao jobsearch={jobsearch} setJobsearch={setJobsearch} />
       )}
 
       {/* ---------- HOJE ---------- */}
