@@ -75,6 +75,7 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
   const [draft, setDraft] = useState({ label: "", date: TODAY });
   const [showClosed, setShowClosed] = useState(false);
   const [metaEdit, setMetaEdit] = useState(false);
+  const [filter, setFilter] = useState("todos"); // todos | rafa | lucas
 
   const combinedGoal = goals.rafa + goals.lucas;
   const countDay = (p, day = TODAY) => procs.filter((x) => x.person === p && x.createdAt === day).length;
@@ -92,9 +93,10 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
   const say = (t) => { setFlash(t); setTimeout(() => setFlash(null), 2200); };
   const upd = (id, fn) => setProcs((l) => l.map((x) => (x.id === id ? fn(x) : x)));
 
-  const active = procs.filter((x) => !x.closed).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const closed = procs.filter((x) => x.closed);
-  const agenda = procs.filter((x) => !x.closed)
+  const byFilter = (x) => filter === "todos" || x.person === filter;
+  const active = procs.filter((x) => !x.closed && byFilter(x)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const closed = procs.filter((x) => x.closed && byFilter(x));
+  const agenda = procs.filter((x) => !x.closed && byFilter(x))
     .flatMap((x) => x.events.filter((e) => e.date >= TODAY && e.label !== "Currículo enviado").map((e) => ({ ...e, company: x.company, person: x.person })))
     .sort((a, b) => a.date.localeCompare(b.date));
 
@@ -240,7 +242,17 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
       </>}
 
       <SectionTitle icon={Briefcase} color={VAGAS.color} right={<button onClick={() => setAddOpen(true)} style={{ ...btn, padding: "5px 10px", fontSize: 12 }}><Plus size={13} /> novo</button>}>Em andamento</SectionTitle>
-      {active.length === 0 && <div style={{ ...card, padding: "20px", textAlign: "center", color: C.faint, fontSize: 13, borderStyle: "dashed" }}>Nenhum processo ainda. Toque em "enviei" quando mandar um currículo — o processo nasce aqui.</div>}
+      <div style={{ display: "flex", gap: 3, marginBottom: 12, background: "#F3F2EF", padding: 3, borderRadius: 10 }}>
+        {[["todos", "Todos", null], ["rafa", "Rafaela", PEOPLE.rafa.color], ["lucas", "Lucas", PEOPLE.lucas.color]].map(([k, label, col]) => {
+          const on = filter === k;
+          return (
+            <button key={k} onClick={() => setFilter(k)} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "7px 8px", borderRadius: 8, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: on ? 500 : 400, background: on ? C.surface : "transparent", color: on ? C.ink : C.sub, boxShadow: on ? "0 1px 3px rgba(0,0,0,0.07)" : "none" }}>
+              {col && <Dot color={col} />}{label}
+            </button>
+          );
+        })}
+      </div>
+      {active.length === 0 && <div style={{ ...card, padding: "20px", textAlign: "center", color: C.faint, fontSize: 13, borderStyle: "dashed" }}>{filter === "todos" ? 'Nenhum processo ainda. Toque em "enviei" quando mandar um currículo — o processo nasce aqui.' : `Nenhum processo em andamento de ${PEOPLE[filter].name}.`}</div>}
       {active.map((x) => {
         const expanded = expandId === x.id; const adding = phaseFor === x.id; const menu = menuId === x.id;
         const phases = phasesOf(x); const cur = currentOf(x); const nxt = nextOf(x);
