@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import {
   Home, Calendar, Check, Plus, Trash2, Briefcase, Utensils, HeartPulse,
   RefreshCw, ChevronLeft, ChevronRight, ChevronDown, User, X, Flame, TrendingUp,
-  Stethoscope, Lightbulb, ArrowRight, Pencil, LogOut, Heart, CircleSlash, MoreHorizontal, Cat
+  Stethoscope, Lightbulb, ArrowRight, Target, Pencil, LogOut, Heart, CircleSlash, MoreHorizontal, Cat
 } from "lucide-react";
 
 const SEED_PEOPLE = {
@@ -189,12 +189,13 @@ const EMPTY_WEEK = { done: {}, presence: {}, skip: {}, move: {}, add: {}, meals:
 
 import { supabase } from "./supabaseClient";
 import Recolocacao from "./Recolocacao";
+import Metas from "./Metas";
 
 // One household row holds everything. We load it once, subscribe to
 // realtime changes (so the other person's edits appear live), and
 // write back debounced. The shape mirrors the original three blobs:
 // { templates, weeks, people }.
-const EMPTY = { templates: SEED_TEMPLATES, weeks: {}, people: SEED_PEOPLE, jobsearch: {} };
+const EMPTY = { templates: SEED_TEMPLATES, weeks: {}, people: SEED_PEOPLE, jobsearch: {}, metas: {} };
 
 function useHousehold(code) {
   const [data, setData] = useState(EMPTY);
@@ -226,6 +227,7 @@ function useHousehold(code) {
             weeks: row.weeks || {},
             people: row.people && Object.keys(row.people).length ? row.people : SEED_PEOPLE,
             jobsearch: row.jobsearch || {},
+            metas: row.metas || {},
           });
         }
         setLoaded(true);
@@ -246,6 +248,7 @@ function useHousehold(code) {
             weeks: r.weeks || {},
             people: r.people && Object.keys(r.people).length ? r.people : SEED_PEOPLE,
             jobsearch: r.jobsearch || {},
+            metas: r.metas || {},
           });
         })
       .subscribe();
@@ -258,7 +261,7 @@ function useHousehold(code) {
     saveTimer.current = setTimeout(async () => {
       skipNextRealtime.current = true;
       const { error: upErr } = await supabase.from("households")
-        .update({ templates: next.templates, weeks: next.weeks, people: next.people, jobsearch: next.jobsearch })
+        .update({ templates: next.templates, weeks: next.weeks, people: next.people, jobsearch: next.jobsearch, metas: next.metas })
         .eq("code", code);
       if (upErr) setError(upErr.message);
     }, 500);
@@ -278,6 +281,7 @@ function useHousehold(code) {
     weeks: data.weeks, setWeeks: makeSetter("weeks"),
     peopleRaw: data.people, setPeopleRaw: makeSetter("people"),
     jobsearch: data.jobsearch, setJobsearch: makeSetter("jobsearch"),
+    metas: data.metas, setMetas: makeSetter("metas"),
     loaded, error,
   };
 }
@@ -306,7 +310,7 @@ function Routine() {
   // Na aba Hoje, a semana é a do dia escolhido; nas outras, a do navegador de semanas.
   const wid = tab === "hoje" ? mondayStrOf(selDate) : weekId(offset);
 
-  const { templates, setTemplates, weeks, setWeeks, peopleRaw, setPeopleRaw, jobsearch, setJobsearch, loaded, error } = useHousehold(code);
+  const { templates, setTemplates, weeks, setWeeks, peopleRaw, setPeopleRaw, jobsearch, setJobsearch, metas, setMetas, loaded, error } = useHousehold(code);
 
   const PEOPLE = useMemo(() => {
     const out = {};
@@ -558,6 +562,7 @@ function Routine() {
     { id: "historico", label: "Histórico", icon: TrendingUp },
     { id: "rotina", label: "Rotina", icon: Home },
     { id: "vagas", label: "Recolocação", icon: Briefcase },
+    { id: "metas", label: `Metas ${PEOPLE.rafa.name}`, icon: Target },
   ];
 
   const card = { background: C.surface, border: `1px solid ${C.line}`, borderRadius: 14 };
@@ -623,6 +628,11 @@ function Routine() {
       {/* ---------- RECOLOCAÇÃO ---------- */}
       {tab === "vagas" && (
         <Recolocacao jobsearch={jobsearch} setJobsearch={setJobsearch} />
+      )}
+
+      {/* ---------- METAS PESSOAIS ---------- */}
+      {tab === "metas" && (
+        <Metas metas={metas} setMetas={setMetas} owner={PEOPLE.rafa} />
       )}
 
       {/* ---------- HOJE ---------- */}
