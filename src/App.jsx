@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   Home, Calendar, Check, Plus, Trash2, Briefcase, Utensils, HeartPulse,
-  RefreshCw, ChevronLeft, ChevronRight, User, X, Flame, TrendingUp,
+  RefreshCw, ChevronLeft, ChevronRight, ChevronDown, User, X, Flame, TrendingUp,
   Stethoscope, Lightbulb, ArrowRight, Pencil, LogOut, Heart, CircleSlash, MoreHorizontal, Cat
 } from "lucide-react";
 
@@ -105,7 +105,24 @@ function withNewVersion(t, fromDate, fields) {
   }
   versions.push({ from: fromDate, ...fields });
   versions.sort((a, b) => (a.from || "0000-00-00").localeCompare(b.from || "0000-00-00"));
-  return { id: t.id, versions };
+  return { ...metaOf(t), versions };
+}
+// Metadados da tarefa que não mudam por versão: id, data de término e tipo (rotina ou período).
+function metaOf(t) {
+  const m = { id: t.id };
+  if (t.until) m.until = t.until;
+  if (t.kind) m.kind = t.kind;
+  return m;
+}
+// Define ou limpa a data de término (último dia em que a tarefa acontece).
+function withUntil(t, until) {
+  const next = { ...t };
+  if (until) next.until = until; else delete next.until;
+  return next;
+}
+// A tarefa já foi encerrada antes desta data?
+function isEnded(t, dateStr) {
+  return !!t.until && t.until < dateStr;
 }
 
 // Segunda-feira (âncora da semana) de uma data qualquer.
@@ -124,6 +141,7 @@ function weeksApart(aMon, bMon) {
 function isScheduledOn(t, monday, i) {
   const dateStr = addDays(monday, i);
   if (dateStr < firstFrom(t)) return false;
+  if (t.until && dateStr > t.until) return false;
   const v = verOf(t, dateStr);
   if (!v.days || !v.days.includes(i)) return false;
   const freq = v.freq || "semanal";
@@ -137,6 +155,37 @@ function isScheduledOn(t, monday, i) {
   }
   return true;
 }
+
+// Dias (0=Seg … 6=Dom) em que a tarefa acontece numa semana, já com os ajustes daquela semana:
+// "move" sobrepõe a agenda da semana (inclusive lista vazia = não acontece nesta semana),
+// "add" traz ocorrências remanejadas de outra semana para uma data específica.
+function occDays(t, w, monday) {
+  const moved = w?.move?.[t.id];
+  const base = Array.isArray(moved) ? moved : [0, 1, 2, 3, 4, 5, 6].filter((i) => isScheduledOn(t, monday, i));
+  const added = Object.keys(w?.add?.[t.id] || {}).map(Number);
+  return Array.from(new Set([...base, ...added])).sort((a, b) => a - b);
+}
+// Dias da agenda base da semana (sem as ocorrências trazidas de outras semanas)
+function baseDays(t, w, monday) {
+  const moved = w?.move?.[t.id];
+  return Array.isArray(moved) ? moved : [0, 1, 2, 3, 4, 5, 6].filter((i) => isScheduledOn(t, monday, i));
+}
+function dayIdxOf(dateStr) {
+  const js = new Date(dateStr + "T00:00:00").getDay();
+  return js === 0 ? 6 : js - 1;
+}
+function ddmm(dateStr) {
+  const [, m, d] = dateStr.split("-");
+  return `${d}/${m}`;
+}
+// ex: "Qua 05/11"
+function fmtDay(dateStr) {
+  return `${DAYS[dayIdxOf(dateStr)]} ${ddmm(dateStr)}`;
+}
+function daysBetween(a, b) {
+  return Math.round((new Date(b + "T00:00:00") - new Date(a + "T00:00:00")) / 86400000);
+}
+const EMPTY_WEEK = { done: {}, presence: {}, skip: {}, move: {}, add: {}, meals: {}, appts: [], wins: "", extras: [], assign: {} };
 
 import { supabase } from "./supabaseClient";
 import Recolocacao from "./Recolocacao";
@@ -247,9 +296,15 @@ function Routine() {
   const [tab, setTab] = useState("hoje");
   const [openActions, setOpenActions] = useState(null); // id da tarefa com o painel "só hoje" aberto
   const [offset, setOffset] = useState(0);
+  const [dayOffset, setDayOffset] = useState(0); // dia exibido na aba Hoje, relativo a hoje
   useEffect(() => { if (tab === "hoje" && offset !== 0) setOffset(0); }, [tab, offset]);
-  const wid = weekId(offset);
+  useEffect(() => { setOpenActions(null); }, [dayOffset]);
   const ti = todayIdx();
+  const today = todayStr();
+  const selDate = addDays(today, dayOffset);
+  const di = dayIdxOf(selDate); // dia da semana exibido na aba Hoje
+  // Na aba Hoje, a semana é a do dia escolhido; nas outras, a do navegador de semanas.
+  const wid = tab === "hoje" ? mondayStrOf(selDate) : weekId(offset);
 
   const { templates, setTemplates, weeks, setWeeks, peopleRaw, setPeopleRaw, jobsearch, setJobsearch, loaded, error } = useHousehold(code);
 
@@ -259,12 +314,11 @@ function Routine() {
     return out;
   }, [peopleRaw]);
 
-  const week = weeks[wid] || { done: {}, presence: {}, skip: {}, move: {}, meals: {}, appts: [], wins: "", extras: [], assign: {} };
-
+  const week = { ...EMPTY_WEEK, ...(weeks[wid] || {}) };
 
   const patchWeek = useCallback((patch) => {
     setWeeks((prev) => {
-      const cur = prev[wid] || { done: {}, presence: {}, skip: {}, move: {}, meals: {}, appts: [], wins: "", extras: [], assign: {} };
+      const cur = { ...EMPTY_WEEK, ...(prev[wid] || {}) };
       return { ...prev, [wid]: { ...cur, ...patch } };
     });
   }, [wid, setWeeks]);
@@ -273,17 +327,10 @@ function Routine() {
   const verAt = useCallback((t, i) => verOf(t, addDays(wid, i)), [wid]);
   // Versão de referência da semana (fim da semana) — usada para agrupar/rotular a linha
   const rowVer = useCallback((t) => verOf(t, addDays(wid, 6)), [wid]);
-  // A tarefa já existe (foi criada) até esta semana?
-  const activeInWeek = useCallback((t) => firstFrom(t) <= addDays(wid, 6), [wid]);
-
-  // Dias em que a tarefa está agendada nesta semana (versão por dia + frequência + remanejo)
-  const effectiveDays = useCallback((t) => {
-    const moved = week.move[t.id];
-    if (moved && moved.length) return moved;
-    const out = [];
-    for (let i = 0; i < 7; i++) if (isScheduledOn(t, wid, i)) out.push(i);
-    return out;
-  }, [week, wid]);
+  // Dias em que a tarefa está agendada nesta semana (versão por dia + frequência + término + remanejo)
+  const effectiveDays = useCallback((t) => occDays(t, week, wid), [week, wid]);
+  // De onde veio uma ocorrência remanejada de outra semana (data original), se for o caso
+  const movedFrom = (t, d) => week.add?.[t.id]?.[d] || null;
 
   const isDone = (t, d) => !!week.done[`${t.id}:${d}`];
   const isSkipped = (t, d) => !!week.skip[`${t.id}:${d}`];
@@ -312,9 +359,71 @@ function Routine() {
     patchWeek({ skip: nextSkip, done: nextDone });
   };
 
-  // ---- Atividades avulsas (só nesta semana, não viram rotina) ----
-  const addExtra = (e) => patchWeek({ extras: [...(week.extras || []), { id: "x" + Date.now(), ...e }] });
+  // ---- Atividades avulsas ----
+  // Num dia só: fica guardada na semana daquela data. Com repetição: vira uma tarefa de período
+  // (de/até), que reaparece sozinha nos dias escolhidos e some depois da data final.
+  const addExtraOn = (dateStr, e) => {
+    const w = mondayStrOf(dateStr);
+    setWeeks((prev) => {
+      const cur = { ...EMPTY_WEEK, ...(prev[w] || {}) };
+      return { ...prev, [w]: { ...cur, extras: [...(cur.extras || []), { id: "x" + Date.now(), ...e, day: dayIdxOf(dateStr) }] } };
+    });
+  };
+  const addPeriod = ({ title, who, cat, start, end, days }) => {
+    setTemplates((prev) => [...prev, {
+      id: "p" + Date.now(), kind: "periodo", until: end,
+      versions: [{ from: start, title, cat, who, days, flexible: false, freq: "semanal" }],
+    }]);
+  };
   const removeExtra = (id) => patchWeek({ extras: (week.extras || []).filter((x) => x.id !== id) });
+
+  // ---- Remanejar para uma data específica (mesma semana ou outra) ----
+  const moveTaskOcc = (t, fromDate, toDate) => {
+    if (toDate === fromDate) return;
+    setWeeks((prev) => {
+      const next = { ...prev };
+      const get = (w) => ({ ...EMPTY_WEEK, ...(next[w] || {}) });
+      const fw = mondayStrOf(fromDate), fi = dayIdxOf(fromDate);
+      let src = get(fw);
+      let origin = fromDate;
+      const srcAdded = { ...(src.add?.[t.id] || {}) };
+      if (srcAdded[fi] != null) {
+        // a ocorrência já tinha vindo de outra semana: tira de lá
+        origin = srcAdded[fi];
+        delete srcAdded[fi];
+        const add = { ...(src.add || {}) };
+        if (Object.keys(srcAdded).length) add[t.id] = srcAdded; else delete add[t.id];
+        src = { ...src, add };
+      } else {
+        src = { ...src, move: { ...src.move, [t.id]: baseDays(t, src, fw).filter((d) => d !== fi) } };
+      }
+      next[fw] = src;
+      if (toDate) {
+        const tw = mondayStrOf(toDate), tix = dayIdxOf(toDate);
+        let dst = get(tw);
+        if (tw === fw) {
+          const nb = Array.from(new Set([...baseDays(t, dst, tw), tix])).sort((a, b) => a - b);
+          dst = { ...dst, move: { ...dst.move, [t.id]: nb } };
+        } else {
+          dst = { ...dst, add: { ...(dst.add || {}), [t.id]: { ...(dst.add?.[t.id] || {}), [tix]: origin } } };
+        }
+        next[tw] = dst;
+      }
+      return next;
+    });
+  };
+  const moveExtraOcc = (e, fromDate, toDate) => {
+    if (!toDate || toDate === fromDate) return;
+    setWeeks((prev) => {
+      const next = { ...prev };
+      const fw = mondayStrOf(fromDate), tw = mondayStrOf(toDate);
+      const src = { ...EMPTY_WEEK, ...(next[fw] || {}) };
+      next[fw] = { ...src, extras: (src.extras || []).filter((x) => x.id !== e.id) };
+      const dst = { ...EMPTY_WEEK, ...(next[tw] || {}) };
+      next[tw] = { ...dst, extras: [...(dst.extras || []), { ...e, day: dayIdxOf(toDate), movedFrom: e.movedFrom || fromDate }] };
+      return next;
+    });
+  };
 
   const togglePresence = (person, d) => {
     const cur = week.presence[person] || [];
@@ -356,10 +465,7 @@ function Routine() {
 
   const applyMove = (taskId, from, to) => {
     const t = templates.find((x) => x.id === taskId);
-    const base = effectiveDays(t);
-    const filtered = base.filter((d) => d !== from);
-    const next = to === null ? filtered : Array.from(new Set([...filtered, to])).sort((a, b) => a - b);
-    patchWeek({ move: { ...week.move, [taskId]: next } });
+    moveTaskOcc(t, addDays(wid, from), to === null ? null : addDays(wid, to));
   };
 
   // ---- Stats ----
@@ -384,27 +490,41 @@ function Routine() {
       if (!w) break;
       let tot = 0, dn = 0;
       templates.forEach((t) => {
-        for (let i = 0; i < 7; i++) {
-          if (!isScheduledOn(t, wDate, i)) continue;
-          if (w.skip?.[`${t.id}:${i}`]) continue;
+        occDays(t, w, wDate).forEach((i) => {
+          if (w.skip?.[`${t.id}:${i}`]) return;
           tot++;
           if (w.done?.[`${t.id}:${i}`]) dn++;
-        }
+        });
       });
       if (tot && dn / tot >= 0.7) s++; else break;
     }
     return s;
   }, [weeks, templates]);
 
+  // Itens do dia exibido na aba Hoje (pode ser ontem, amanhã etc.)
   const todayTasks = useMemo(
-    () => templates.filter((t) => effectiveDays(t).includes(ti)),
-    [templates, ti, effectiveDays]
+    () => templates.filter((t) => effectiveDays(t).includes(di)),
+    [templates, di, effectiveDays]
   );
 
   const todayExtras = useMemo(
-    () => (week.extras || []).filter((e) => e.day === ti),
-    [week, ti]
+    () => (week.extras || []).filter((e) => e.day === di),
+    [week, di]
   );
+
+  // Pendências de uma data qualquer (para os pontinhos da faixa de dias)
+  const pendingOn = (dateStr) => {
+    const m = mondayStrOf(dateStr), i = dayIdxOf(dateStr);
+    const w = { ...EMPTY_WEEK, ...(weeks[m] || {}) };
+    let n = 0;
+    templates.forEach((t) => {
+      if (!occDays(t, w, m).includes(i)) return;
+      if (w.skip[`${t.id}:${i}`] || w.done[`${t.id}:${i}`]) return;
+      n++;
+    });
+    (w.extras || []).forEach((e) => { if (e.day === i && !w.done[`${e.id}:${i}`]) n++; });
+    return n;
+  };
 
   if (error) {
     return (
@@ -508,13 +628,18 @@ function Routine() {
       {/* ---------- HOJE ---------- */}
       {tab === "hoje" && (
         <div style={{ animation: "fade .25s ease" }}>
+          <DayStrip today={today} dayOffset={dayOffset} setDayOffset={setDayOffset} pendingOn={pendingOn} C={C} />
+
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 14 }}>
-            <div style={{ fontSize: 16, fontWeight: 500 }}>{DAY_FULL[ti]}</div>
-            <div style={{ fontSize: 12.5, color: C.sub }}>{[...todayTasks.filter((t) => !isSkipped(t, ti)), ...todayExtras].filter((x) => isDone(x, ti)).length} de {todayTasks.filter((t) => !isSkipped(t, ti)).length + todayExtras.length} feitas</div>
+            <div style={{ fontSize: 16, fontWeight: 500 }}>
+              {dayOffset === 0 ? "Hoje" : dayOffset === -1 ? "Ontem" : dayOffset === 1 ? "Amanhã" : DAY_FULL[di]}
+              <span style={{ fontSize: 13, fontWeight: 400, color: C.faint, marginLeft: 8 }}>{dayOffset === 0 || dayOffset === -1 || dayOffset === 1 ? `${DAY_FULL[di]}, ${ddmm(selDate)}` : ddmm(selDate)}</span>
+            </div>
+            <div style={{ fontSize: 12.5, color: C.sub }}>{[...todayTasks.filter((t) => !isSkipped(t, di)), ...todayExtras].filter((x) => isDone(x, di)).length} de {todayTasks.filter((t) => !isSkipped(t, di)).length + todayExtras.length} feitas</div>
           </div>
 
           {/* presence-aware nudge */}
-          {suggestions.filter((s) => s.from === ti || effectiveDays(s.task).includes(ti)).length === 0 && suggestions.length > 0 && (
+          {suggestions.filter((s) => s.from === di || effectiveDays(s.task).includes(di)).length === 0 && suggestions.length > 0 && (
             <div style={{ ...card, padding: "12px 14px", marginBottom: 14, background: "#FFF9EE", borderColor: "#F0E2C4", display: "flex", gap: 10 }}>
               <Lightbulb size={17} color="#B06A2C" style={{ flexShrink: 0, marginTop: 1 }} />
               <div style={{ fontSize: 13, color: "#7A4E18", lineHeight: 1.5 }}>
@@ -525,22 +650,22 @@ function Routine() {
 
           {(() => {
             const order = ["rafa", "lucas", "both"];
-            const dayAppts = (week.appts || []).filter((a) => a.day === ti);
+            const dayAppts = (week.appts || []).filter((a) => a.day === di);
             const groups = order.map((pk) => ({
               pk,
-              tasks: todayTasks.filter((t) => assignFor(t, ti) === pk),
+              tasks: todayTasks.filter((t) => assignFor(t, di) === pk),
               extras: todayExtras.filter((e) => e.who === pk),
               appts: dayAppts.filter((a) => a.who === pk),
             })).filter((g) => g.tasks.length || g.extras.length || g.appts.length);
             if (groups.length === 0) {
-              return <div style={{ textAlign: "center", padding: "40px 0", color: C.faint, fontSize: 13.5 }}>Nada para hoje. Respira e aproveita.</div>;
+              return <div style={{ textAlign: "center", padding: "40px 0", color: C.faint, fontSize: 13.5 }}>{dayOffset === 0 ? "Nada para hoje. Respira e aproveita." : "Nada marcado para este dia."}</div>;
             }
             return (
               <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                 {groups.map((g) => {
                   const p = PEOPLE[g.pk];
-                  const countItems = [...g.tasks.filter((t) => !isSkipped(t, ti)), ...g.extras];
-                  const doneCount = countItems.filter((x) => isDone(x, ti)).length;
+                  const countItems = [...g.tasks.filter((t) => !isSkipped(t, di)), ...g.extras];
+                  const doneCount = countItems.filter((x) => isDone(x, di)).length;
                   return (
                     <div key={g.pk}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -550,22 +675,22 @@ function Routine() {
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         {g.tasks.map((t) => {
-                          const done = isDone(t, ti); const skipped = isSkipped(t, ti);
-                          const v = verAt(t, ti); const cat = CATEGORIES[v.cat]; const Ic = cat.icon;
+                          const done = isDone(t, di); const skipped = isSkipped(t, di);
+                          const v = verAt(t, di); const cat = CATEGORIES[v.cat]; const Ic = cat.icon;
                           if (skipped) {
                             return (
                               <div key={t.id} className="rot-row"
                                 style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", opacity: 0.55 }}>
-                                <div onClick={() => toggleSkip(t, ti)} title="Voltar — precisa fazer" style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `1px dashed ${C.line2}`, background: "transparent" }}>
+                                <div onClick={() => toggleSkip(t, di)} title="Voltar — precisa fazer" style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `1px dashed ${C.line2}`, background: "transparent" }}>
                                   <CircleSlash size={13} color={C.faint} />
                                 </div>
-                                <div onClick={() => toggleSkip(t, ti)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                                <div onClick={() => toggleSkip(t, di)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
                                   <div style={{ fontSize: 14.5, textDecoration: "line-through", color: C.sub }}>{v.title}</div>
                                   <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                                     <Tag soft="#F1F0EC" color={C.faint}>não precisou</Tag>
                                   </div>
                                 </div>
-                                <button onClick={() => toggleSkip(t, ti)} title="Voltar — precisa fazer" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0 }}><RefreshCw size={13} color={C.faint} /></button>
+                                <button onClick={() => toggleSkip(t, di)} title="Voltar — precisa fazer" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0 }}><RefreshCw size={13} color={C.faint} /></button>
                               </div>
                             );
                           }
@@ -573,54 +698,63 @@ function Routine() {
                             <div key={t.id}>
                               <div className="rot-row"
                                 style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", opacity: done ? 0.55 : 1, transition: "opacity .15s, border-color .15s", ...(openActions === t.id ? { borderBottomLeftRadius: 0, borderBottomRightRadius: 0 } : {}) }}>
-                                <div onClick={() => toggleDone(t, ti)} style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
+                                <div onClick={() => toggleDone(t, di)} style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
                                   {done && <Check size={13} color="#fff" />}
                                 </div>
-                                <div onClick={() => toggleDone(t, ti)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                                <div onClick={() => toggleDone(t, di)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
                                   <div style={{ fontSize: 14.5, textDecoration: done ? "line-through" : "none" }}>{v.title}</div>
                                   <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                                     <Tag soft={cat.soft} color={cat.color}><Ic size={11} /> {cat.label}</Tag>
-                                    {assignFor(t, ti) !== v.who && <Tag soft="#F1F0EC" color={C.faint}>só hoje</Tag>}
+                                    {t.until && <Tag soft="#F1F0EC" color={C.faint}>até {ddmm(t.until)}</Tag>}
+                                    {movedFrom(t, di) && <Tag soft="#FAF0E4" color="#B06A2C">veio de {fmtDay(movedFrom(t, di))}</Tag>}
+                                    {assignFor(t, di) !== v.who && <Tag soft="#F1F0EC" color={C.faint}>só neste dia</Tag>}
                                   </div>
                                 </div>
-                                <button onClick={() => setOpenActions(openActions === t.id ? null : t.id)} title="Ações de hoje" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0, background: openActions === t.id ? "#F1F0EC" : "transparent" }}><MoreHorizontal size={16} color={C.faint} /></button>
+                                <button onClick={() => setOpenActions(openActions === t.id ? null : t.id)} title="Ações deste dia" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0, background: openActions === t.id ? "#F1F0EC" : "transparent" }}><MoreHorizontal size={16} color={C.faint} /></button>
                               </div>
                               {openActions === t.id && (
                                 <div style={{ background: "#F7F6F3", border: `1px solid ${C.line}`, borderTop: "none", borderBottomLeftRadius: 12, borderBottomRightRadius: 12, padding: "12px 14px" }}>
-                                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>Passar hoje para</div>
+                                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>Passar este dia para</div>
                                   <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                                    {["rafa", "lucas", "both"].map((k) => { const on = assignFor(t, ti) === k; const pp = PEOPLE[k]; return (
-                                      <button key={k} onClick={() => { setAssign(t, ti, k); setOpenActions(null); }} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${on ? pp.color : C.line}`, background: on ? pp.soft : C.surface, color: on ? pp.color : C.sub, fontWeight: on ? 500 : 400 }}>{pp.name}</button>
+                                    {["rafa", "lucas", "both"].map((k) => { const on = assignFor(t, di) === k; const pp = PEOPLE[k]; return (
+                                      <button key={k} onClick={() => { setAssign(t, di, k); setOpenActions(null); }} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${on ? pp.color : C.line}`, background: on ? pp.soft : C.surface, color: on ? pp.color : C.sub, fontWeight: on ? 500 : 400 }}>{pp.name}</button>
                                     ); })}
                                   </div>
-                                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>Jogar para outro dia</div>
-                                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 12 }}>
-                                    {DAYS.map((d, i) => { const isToday = i === ti; return (
-                                      <button key={d} disabled={isToday} onClick={() => { applyMove(t.id, ti, i); setOpenActions(null); }} title={isToday ? "hoje" : `mover para ${DAY_FULL[i]}`} style={{ flex: "1 0 auto", minWidth: 38, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: isToday ? "default" : "pointer", opacity: isToday ? 0.5 : 1, border: `1px solid ${C.line}`, background: isToday ? "#EEEDE9" : C.surface, color: isToday ? C.faint : C.sub }}>{d}</button>
-                                    ); })}
-                                  </div>
-                                  <button onClick={() => { toggleSkip(t, ti); setOpenActions(null); }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, cursor: "pointer", fontSize: 12.5, color: C.sub }}><CircleSlash size={13} /> Não precisou esta semana</button>
+                                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>Jogar para outra data</div>
+                                  <DatePicker fromDate={selDate} C={C} onPick={(d) => { moveTaskOcc(t, selDate, d); setOpenActions(null); }} />
+                                  <button onClick={() => { toggleSkip(t, di); setOpenActions(null); }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, cursor: "pointer", fontSize: 12.5, color: C.sub }}><CircleSlash size={13} /> Não precisou neste dia</button>
                                 </div>
                               )}
                             </div>
                           );
                         })}
                         {g.extras.map((e) => {
-                          const done = isDone(e, ti); const cat = CATEGORIES[e.cat] || CATEGORIES.vida; const Ic = cat.icon;
+                          const done = isDone(e, di); const cat = CATEGORIES[e.cat] || CATEGORIES.vida; const Ic = cat.icon;
+                          const open = openActions === e.id;
                           return (
-                            <div key={e.id} className="rot-row"
-                              style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", opacity: done ? 0.55 : 1, transition: "opacity .15s, border-color .15s" }}>
-                              <div onClick={() => toggleDone(e, ti)} style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
-                                {done && <Check size={13} color="#fff" />}
-                              </div>
-                              <div onClick={() => toggleDone(e, ti)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
-                                <div style={{ fontSize: 14.5, textDecoration: done ? "line-through" : "none" }}>{e.title}</div>
-                                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-                                  <Tag soft={cat.soft} color={cat.color}><Ic size={11} /> {cat.label}</Tag>
-                                  <Tag soft="#F1F0EC" color={C.faint}>avulsa</Tag>
+                            <div key={e.id}>
+                              <div className="rot-row"
+                                style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", opacity: done ? 0.55 : 1, transition: "opacity .15s, border-color .15s", ...(open ? { borderBottomLeftRadius: 0, borderBottomRightRadius: 0 } : {}) }}>
+                                <div onClick={() => toggleDone(e, di)} style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${done ? cat.color : "#D6D5CF"}`, background: done ? cat.color : "transparent" }}>
+                                  {done && <Check size={13} color="#fff" />}
                                 </div>
+                                <div onClick={() => toggleDone(e, di)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                                  <div style={{ fontSize: 14.5, textDecoration: done ? "line-through" : "none" }}>{e.title}</div>
+                                  <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+                                    <Tag soft={cat.soft} color={cat.color}><Ic size={11} /> {cat.label}</Tag>
+                                    <Tag soft="#F1F0EC" color={C.faint}>avulsa</Tag>
+                                    {e.movedFrom && <Tag soft="#FAF0E4" color="#B06A2C">veio de {fmtDay(e.movedFrom)}</Tag>}
+                                  </div>
+                                </div>
+                                <button onClick={() => setOpenActions(open ? null : e.id)} title="Ações deste dia" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0, background: open ? "#F1F0EC" : "transparent" }}><MoreHorizontal size={16} color={C.faint} /></button>
                               </div>
-                              <button onClick={() => removeExtra(e.id)} title="Remover" style={{ ...iconBtn, width: 30, height: 30, flexShrink: 0 }}><Trash2 size={14} color={C.faint} /></button>
+                              {open && (
+                                <div style={{ background: "#F7F6F3", border: `1px solid ${C.line}`, borderTop: "none", borderBottomLeftRadius: 12, borderBottomRightRadius: 12, padding: "12px 14px" }}>
+                                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>Jogar para outra data</div>
+                                  <DatePicker fromDate={selDate} C={C} onPick={(d) => { moveExtraOcc(e, selDate, d); setOpenActions(null); }} />
+                                  <button onClick={() => { removeExtra(e.id); setOpenActions(null); }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, cursor: "pointer", fontSize: 12.5, color: C.sub }}><Trash2 size={13} /> Remover</button>
+                                </div>
+                              )}
                             </div>
                           );
                         })}
@@ -641,7 +775,7 @@ function Routine() {
             );
           })()}
 
-          <ExtraAdder onAdd={addExtra} C={C} PEOPLE={PEOPLE} ti={ti} />
+          <ExtraAdder onAddOne={addExtraOn} onAddPeriod={addPeriod} C={C} PEOPLE={PEOPLE} defaultDate={selDate} />
         </div>
       )}
 
@@ -668,7 +802,7 @@ function Routine() {
               </thead>
               <tbody>
                 {["rafa", "lucas", "both"].map((pk) => {
-                  const items = templates.filter((t) => activeInWeek(t) && rowVer(t).who === pk && effectiveDays(t).length > 0);
+                  const items = templates.filter((t) => rowVer(t).who === pk && effectiveDays(t).length > 0);
                   const extrasFor = (week.extras || []).filter((e) => e.who === pk);
                   if (!items.length && !extrasFor.length) return null;
                   const pp = PEOPLE[pk];
@@ -683,12 +817,13 @@ function Routine() {
                       </tr>
                       {items.map((t) => {
                         const rv = rowVer(t); const cat = CATEGORIES[rv.cat]; const days = effectiveDays(t);
-                        const moved = !!week.move[t.id];
+                        const moved = Array.isArray(week.move[t.id]) || !!week.add?.[t.id];
                         return (
                           <tr key={t.id} style={{ borderTop: `1px solid ${C.line}` }}>
                             <td style={{ padding: "9px 8px 9px 0" }}>
                               <div style={{ fontSize: 12.5, lineHeight: 1.3, paddingLeft: 14 }}>
                                 {rv.title}
+                                {t.until && <span style={{ fontSize: 10, color: C.faint }}> · até {ddmm(t.until)}</span>}
                                 {moved && <span style={{ fontSize: 10, color: "#B06A2C" }}> · ajustada</span>}
                               </div>
                             </td>
@@ -1003,23 +1138,106 @@ function ApptAdder({ onAdd, C, PEOPLE }) {
   );
 }
 
-// Atividade avulsa: acontece só num dia desta semana, não vira rotina.
-function ExtraAdder({ onAdd, C, PEOPLE, ti }) {
+// Navegação da aba Hoje: setas de dia a dia e uma faixa de ontem até os próximos dias.
+function DayStrip({ today, dayOffset, setDayOffset, pendingOn, C }) {
+  const strip = [-1, 0, 1, 2, 3, 4, 5];
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <button className="rot-btn" onClick={() => setDayOffset(dayOffset - 1)} title="Dia anterior" style={{ ...iconBtn, flexShrink: 0 }}><ChevronLeft size={18} /></button>
+        <div style={{ flex: 1, display: "flex", gap: 4, minWidth: 0 }}>
+          {strip.map((o) => {
+            const d = addDays(today, o); const on = o === dayOffset; const isToday = o === 0;
+            const pend = pendingOn(d);
+            return (
+              <button key={o} onClick={() => setDayOffset(o)} title={fmtDay(d)}
+                style={{ flex: 1, minWidth: 0, padding: "6px 0 5px", borderRadius: 10, cursor: "pointer", border: `1px solid ${on ? C.ink : isToday ? C.accent : C.line}`, background: on ? C.ink : C.surface, color: on ? "#fff" : isToday ? C.accent : C.sub, display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+                <span style={{ fontSize: 10.5, opacity: on ? 0.8 : 1 }}>{o === -1 ? "Ontem" : isToday ? "Hoje" : DAYS[dayIdxOf(d)]}</span>
+                <span style={{ fontSize: 14, fontWeight: 500 }}>{Number(d.slice(8, 10))}</span>
+                <span style={{ width: 5, height: 5, borderRadius: 99, background: pend ? (on ? "#fff" : "#B06A2C") : "transparent" }} />
+              </button>
+            );
+          })}
+        </div>
+        <button className="rot-btn" onClick={() => setDayOffset(dayOffset + 1)} title="Próximo dia" style={{ ...iconBtn, flexShrink: 0 }}><ChevronRight size={18} /></button>
+      </div>
+      {(dayOffset < -1 || dayOffset > 5) && (
+        <div style={{ textAlign: "center", marginTop: 8 }}>
+          <button onClick={() => setDayOffset(0)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: C.accent, padding: 0 }}>Voltar para hoje</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Escolher a data para onde jogar uma ocorrência: atalhos para os próximos dias ou qualquer data.
+function DatePicker({ fromDate, onPick, C }) {
+  const [custom, setCustom] = useState("");
+  const quick = [1, 2, 3, 4, 5, 6, 7].map((n) => addDays(fromDate, n));
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
+        {quick.map((d, n) => (
+          <button key={d} onClick={() => onPick(d)} title={`mover para ${fmtDay(d)}`}
+            style={{ flex: "1 0 auto", minWidth: 44, padding: "6px 4px", borderRadius: 9, fontSize: 11.5, cursor: "pointer", border: `1px solid ${C.line}`, background: C.surface, color: C.sub, lineHeight: 1.3 }}>
+            <div>{n === 0 ? "+1 dia" : DAYS[dayIdxOf(d)]}</div>
+            <div style={{ fontSize: 10.5, color: C.faint }}>{ddmm(d)}</div>
+          </button>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <input type="date" value={custom} onChange={(e) => setCustom(e.target.value)}
+          style={{ flex: 1, minWidth: 0, boxSizing: "border-box", padding: "7px 10px", borderRadius: 9, border: `1px solid ${C.line}`, fontSize: 13, color: C.ink, background: C.surface, outline: "none" }} />
+        <button disabled={!custom || custom === fromDate} onClick={() => { onPick(custom); setCustom(""); }}
+          style={{ padding: "7px 12px", borderRadius: 9, border: "none", background: "#26251F", color: "#fff", fontSize: 12.5, cursor: custom && custom !== fromDate ? "pointer" : "default", opacity: custom && custom !== fromDate ? 1 : 0.4 }}>Mover</button>
+      </div>
+    </div>
+  );
+}
+
+const dateInput = (C) => ({ width: "100%", boxSizing: "border-box", padding: "8px 10px", borderRadius: 9, border: `1px solid ${C.line}`, fontSize: 13, color: C.ink, background: C.surface, outline: "none" });
+
+// Atividade avulsa: num dia só, ou repetindo num período (de/até) nos dias escolhidos.
+function ExtraAdder({ onAddOne, onAddPeriod, C, PEOPLE, defaultDate }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [who, setWho] = useState("rafa");
   const [cat, setCat] = useState("vida");
-  const [day, setDay] = useState(ti);
-  const reset = () => { setTitle(""); setCat("vida"); setDay(ti); setOpen(false); };
+  const [mode, setMode] = useState("um"); // "um" | "periodo"
+  const [date, setDate] = useState(defaultDate);
+  const [start, setStart] = useState(defaultDate);
+  const [end, setEnd] = useState(addDays(defaultDate, 7));
+  const [days, setDays] = useState([0, 1, 2, 3, 4, 5, 6]);
+  const reset = () => { setTitle(""); setCat("vida"); setMode("um"); setOpen(false); };
+  const openForm = () => { setDate(defaultDate); setStart(defaultDate); setEnd(addDays(defaultDate, 7)); setDays([0, 1, 2, 3, 4, 5, 6]); setOpen(true); };
+
   if (!open) return (
-    <button className="rot-btn" onClick={() => { setDay(ti); setOpen(true); }}
+    <button className="rot-btn" onClick={openForm}
       style={{ display: "flex", alignItems: "center", gap: 6, padding: "11px 14px", borderRadius: 12, border: `1px dashed ${C.line2}`, background: C.surface, cursor: "pointer", fontSize: 13, color: C.sub, marginTop: 16, width: "100%", justifyContent: "center" }}>
-      <Plus size={15} /> Atividade avulsa (só hoje/num dia)
+      <Plus size={15} /> Atividade avulsa
     </button>
   );
+
+  const periodOk = start && end && end >= start && days.length > 0;
+  const ok = title.trim() && (mode === "um" ? !!date : periodOk);
+  // quantas vezes vai acontecer no período (só para mostrar)
+  let count = 0;
+  if (mode === "periodo" && periodOk) {
+    const n = daysBetween(start, end);
+    for (let k = 0; k <= n && k < 400; k++) if (days.includes(dayIdxOf(addDays(start, k)))) count++;
+  }
+  const submit = () => {
+    if (!ok) return;
+    if (mode === "um") onAddOne(date, { title: title.trim(), who, cat });
+    else onAddPeriod({ title: title.trim(), who, cat, start, end, days: [...days].sort((a, b) => a - b) });
+    reset();
+  };
+  const allDays = days.length === 7;
+  const weekdays = days.length === 5 && [0, 1, 2, 3, 4].every((d) => days.includes(d));
+
   return (
     <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 14, padding: 14, marginTop: 16 }}>
-      <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="ex: levar o gato no vet, comprar presente"
+      <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="ex: estudar para a certificação, levar o gato no vet"
         style={{ width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 9, border: `1px solid ${C.line}`, fontSize: 13.5, outline: "none", marginBottom: 12 }} />
 
       <Label C={C}>De quem é?</Label>
@@ -1036,16 +1254,48 @@ function ExtraAdder({ onAdd, C, PEOPLE, ti }) {
         ))}
       </div>
 
-      <Label C={C}>Em que dia?</Label>
-      <div style={{ display: "flex", gap: 5, marginBottom: 12, flexWrap: "wrap" }}>
-        {DAYS.map((d, i) => (
-          <button key={d} onClick={() => setDay(i)} style={{ flex: "1 0 auto", minWidth: 38, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${day === i ? C.accent : C.line}`, background: day === i ? "#EEEDFB" : C.surface, color: day === i ? C.accent : C.sub, fontWeight: day === i ? 500 : 400 }}>{d}</button>
+      <Label C={C}>Quando?</Label>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {[["um", "Num dia só"], ["periodo", "Repetir num período"]].map(([k, lbl]) => (
+          <button key={k} onClick={() => setMode(k)} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${mode === k ? C.accent : C.line}`, background: mode === k ? "#EEEDFB" : C.surface, color: mode === k ? C.accent : C.sub, fontWeight: mode === k ? 500 : 400 }}>{lbl}</button>
         ))}
       </div>
 
+      {mode === "um" ? (
+        <div style={{ marginBottom: 12 }}>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={dateInput(C)} />
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>De</div>
+              <input type="date" value={start} onChange={(e) => setStart(e.target.value)} style={dateInput(C)} />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Até (último dia)</div>
+              <input type="date" value={end} min={start} onChange={(e) => setEnd(e.target.value)} style={dateInput(C)} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+            <button onClick={() => setDays([0, 1, 2, 3, 4, 5, 6])} style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11.5, cursor: "pointer", border: `1px solid ${allDays ? C.accent : C.line}`, background: allDays ? "#EEEDFB" : C.surface, color: allDays ? C.accent : C.sub }}>Todos os dias</button>
+            <button onClick={() => setDays([0, 1, 2, 3, 4])} style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11.5, cursor: "pointer", border: `1px solid ${weekdays ? C.accent : C.line}`, background: weekdays ? "#EEEDFB" : C.surface, color: weekdays ? C.accent : C.sub }}>Dias úteis</button>
+          </div>
+          <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
+            {DAYS.map((d, i) => {
+              const on = days.includes(i);
+              return <button key={d} onClick={() => setDays(on ? days.filter((x) => x !== i) : [...days, i])} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${on ? C.accent : C.line}`, background: on ? C.accent : C.surface, color: on ? "#fff" : C.sub }}>{d}</button>;
+            })}
+          </div>
+          <div style={{ fontSize: 11.5, color: end < start ? "#C04574" : C.faint, marginBottom: 12 }}>
+            {end < start ? "A data final precisa ser depois da inicial." : periodOk ? `Vai aparecer ${count} ${count === 1 ? "vez" : "vezes"}, de ${fmtDay(start)} a ${fmtDay(end)}. Depois disso some sozinha.` : "Escolha pelo menos um dia da semana."}
+          </div>
+        </>
+      )}
+
       <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={() => { if (title.trim()) { onAdd({ title: title.trim(), who, cat, day }); reset(); } }}
-          style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", background: "#26251F", color: "#fff", fontSize: 13, fontWeight: 500, cursor: "pointer" }}>Adicionar</button>
+        <button onClick={submit}
+          style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", background: "#26251F", color: "#fff", fontSize: 13, fontWeight: 500, cursor: ok ? "pointer" : "default", opacity: ok ? 1 : 0.4 }}>Adicionar</button>
         <button onClick={reset} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, color: C.sub, fontSize: 13, cursor: "pointer" }}>Cancelar</button>
       </div>
     </div>
@@ -1062,16 +1312,15 @@ function HistoryView({ weeks, templates, C, PEOPLE }) {
       let tot = 0, dn = 0;
       const cheer = { rafa: 0, lucas: 0, both: 0 };
       templates.forEach((t) => {
-        for (let i = 0; i < 7; i++) {
-          if (!isScheduledOn(t, id, i)) continue;
-          if (w.skip?.[`${t.id}:${i}`]) continue;
+        occDays(t, w, id).forEach((i) => {
+          if (w.skip?.[`${t.id}:${i}`]) return;
           tot++;
           if (w.done?.[`${t.id}:${i}`]) {
             dn++;
             const who = (w.assign && w.assign[`${t.id}:${i}`]) || verOf(t, addDays(id, i)).who;
             cheer[who] = (cheer[who] || 0) + 1;
           }
-        }
+        });
       });
       (w.extras || []).forEach((e) => {
         if (w.done?.[`${e.id}:${e.day}`]) cheer[e.who] = (cheer[e.who] || 0) + 1;
@@ -1125,27 +1374,50 @@ function HistoryView({ weeks, templates, C, PEOPLE }) {
 }
 
 function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, setPeopleRaw }) {
-  const blank = { title: "", cat: "casa", who: "both", days: [ti], flexible: false, freq: "semanal" };
+  const today = todayStr();
+  const blank = { title: "", cat: "casa", who: "both", days: [ti], flexible: false, freq: "semanal", start: today, until: "" };
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [draft, setDraft] = useState(blank);
+  const [showEnded, setShowEnded] = useState(false);
 
   const openNew = () => { setEditingId(null); setDraft(blank); setAdding(true); };
-  const openEdit = (t) => { const v = verOf(t, todayStr()); setEditingId(t.id); setDraft({ title: v.title, cat: v.cat, who: v.who, days: [...v.days], flexible: !!v.flexible, freq: v.freq || "semanal" }); setAdding(true); };
+  const openEdit = (t) => {
+    // tarefa que ainda não começou: edita a primeira versão; encerrada: a última
+    const ref = firstFrom(t) > today ? firstFrom(t) : (t.until && t.until < today ? t.until : today);
+    const v = verOf(t, ref);
+    setEditingId(t.id);
+    setDraft({ title: v.title, cat: v.cat, who: v.who, days: [...v.days], flexible: !!v.flexible, freq: v.freq || "semanal", start: firstFrom(t), until: t.until || "" });
+    setAdding(true);
+  };
   const closeForm = () => { setAdding(false); setEditingId(null); setDraft(blank); };
 
+  const sameFields = (v, f) => v.title === f.title && v.cat === f.cat && v.who === f.who && !!v.flexible === f.flexible
+    && (v.freq || "semanal") === f.freq && [...(v.days || [])].sort().join() === [...f.days].sort().join();
+
+  const untilOk = !draft.until || draft.until >= (editingId ? "0000-00-00" : draft.start);
   const save = () => {
-    if (!draft.title.trim() || draft.days.length === 0) return;
+    if (!draft.title.trim() || draft.days.length === 0 || !untilOk) return;
     const fields = { title: draft.title.trim(), cat: draft.cat, who: draft.who, days: draft.days, flexible: draft.flexible, freq: draft.freq || "semanal" };
     if (editingId) {
-      // versionamento: a alteração vale a partir de hoje; o histórico anterior fica preservado
-      setTemplates(templates.map((t) => t.id === editingId ? withNewVersion(t, todayStr(), fields) : t));
+      setTemplates(templates.map((t) => {
+        if (t.id !== editingId) return t;
+        // versionamento: a alteração vale a partir de hoje (ou do início, se ainda não começou);
+        // o histórico anterior fica preservado. Mudar só a data de término não cria versão nova.
+        const from = firstFrom(t) > today ? firstFrom(t) : today;
+        const nt = sameFields(verOf(t, from), fields) ? t : withNewVersion(t, from, fields);
+        return withUntil(nt, draft.until || null);
+      }));
     } else {
-      setTemplates([...templates, { id: "u" + Date.now(), versions: [{ from: todayStr(), ...fields }] }]);
+      const nt = { id: "u" + Date.now(), versions: [{ from: draft.start || today, ...fields }] };
+      setTemplates([...templates, withUntil(nt, draft.until || null)]);
     }
     closeForm();
   };
   const remove = (id) => { setTemplates(templates.filter((t) => t.id !== id)); if (editingId === id) closeForm(); };
+  const reactivate = (id) => setTemplates(templates.map((t) => t.id === id ? withUntil(t, null) : t));
+  const activeList = templates.filter((t) => !isEnded(t, today));
+  const endedList = templates.filter((t) => isEnded(t, today));
 
   return (
     <div style={{ animation: "fade .25s ease" }}>
@@ -1197,6 +1469,25 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
             })}
           </div>
 
+          <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+            {!editingId && (
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Label C={C}>Começa em</Label>
+                <input type="date" value={draft.start} onChange={(e) => setDraft({ ...draft, start: e.target.value || today })} style={dateInput(C)} />
+              </div>
+            )}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <Label C={C}>Termina em (opcional)</Label>
+              <input type="date" value={draft.until} min={editingId ? undefined : draft.start} onChange={(e) => setDraft({ ...draft, until: e.target.value })} style={dateInput(C)} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 13, fontSize: 11.5 }}>
+            {editingId && <button onClick={() => setDraft({ ...draft, until: today })} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: C.accent, fontSize: 11.5 }}>Encerrar hoje</button>}
+            {draft.until && <button onClick={() => setDraft({ ...draft, until: "" })} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: C.faint, fontSize: 11.5 }}>Sem data de término</button>}
+            {!untilOk && <span style={{ color: "#C04574" }}>O término precisa ser depois do início.</span>}
+            {untilOk && draft.until && <span style={{ color: C.faint }}>Último dia: {fmtDay(draft.until)}. Depois disso sai da rotina, mas o histórico fica.</span>}
+          </div>
+
           <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 12.5, color: C.sub }}>
             <button onClick={() => setDraft({ ...draft, flexible: !draft.flexible })} style={{ width: 20, height: 20, borderRadius: 6, border: `2px solid ${draft.flexible ? C.accent : "#D6D5CF"}`, background: draft.flexible ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0 }}>
               {draft.flexible && <Check size={12} color="#fff" />}
@@ -1213,7 +1504,7 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
 
       <div style={{ marginTop: 14 }}>
         {Object.entries(CATEGORIES).map(([ck, cat]) => {
-          const group = templates.filter((t) => verOf(t, todayStr()).cat === ck);
+          const group = activeList.filter((t) => verOf(t, firstFrom(t) > today ? firstFrom(t) : today).cat === ck);
           if (!group.length) return null;
           const Ic = cat.icon;
           return (
@@ -1221,15 +1512,18 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}><Ic size={13} color={cat.color} /><span style={{ fontSize: 12, fontWeight: 500, color: cat.color }}>{cat.label}</span></div>
               <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                 {group.map((t) => {
-                  const cv = verOf(t, todayStr()); const p = PEOPLE[cv.who]; const isEd = editingId === t.id;
+                  const notYet = firstFrom(t) > today;
+                  const cv = verOf(t, notYet ? firstFrom(t) : today); const p = PEOPLE[cv.who]; const isEd = editingId === t.id;
                   return (
                     <div key={t.id} className="rot-row" onClick={() => openEdit(t)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: C.surface, border: `1px solid ${isEd ? C.accent : C.line}`, borderRadius: 11, cursor: "pointer" }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 13.5, display: "flex", alignItems: "center", gap: 6 }}>{cv.title}{cv.flexible && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 5, background: softOf(PEOPLE.both.color), color: PEOPLE.both.color }}>flexível</span>}</div>
                         <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4, flexWrap: "wrap" }}>
                           <Tag soft={p.soft} color={p.color}>{p.name}</Tag>
-                          <span style={{ fontSize: 11.5, color: C.faint }}>{cv.days.map((d) => DAYS[d]).join(", ")}</span>
+                          <span style={{ fontSize: 11.5, color: C.faint }}>{cv.days.length === 7 ? "Todos os dias" : [...cv.days].sort((a, b) => a - b).map((d) => DAYS[d]).join(", ")}</span>
                           {cv.freq && cv.freq !== "semanal" && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 5, background: "#F1F0EC", color: C.faint }}>{cv.freq === "quinzenal" ? "quinzenal" : "mensal"}</span>}
+                          {notYet && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 5, background: "#EEEDFB", color: C.accent }}>começa {ddmm(firstFrom(t))}</span>}
+                          {t.until && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 5, background: "#F1F0EC", color: C.faint }}>até {ddmm(t.until)}</span>}
                         </div>
                       </div>
                       <button className="rot-btn" onClick={(e) => { e.stopPropagation(); openEdit(t); }} style={{ ...iconBtn, width: 32, height: 32, border: "none" }} aria-label="Editar"><Pencil size={14} color="#9B9A94" /></button>
@@ -1242,6 +1536,34 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
           );
         })}
       </div>
+
+      {endedList.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <button onClick={() => setShowEnded(!showEnded)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 12.5, color: C.sub }}>
+            {showEnded ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Encerradas ({endedList.length})
+          </button>
+          {showEnded && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 7, marginTop: 10 }}>
+              {endedList.map((t) => {
+                const cv = verOf(t, t.until); const p = PEOPLE[cv.who] || PEOPLE.both;
+                return (
+                  <div key={t.id} className="rot-row" style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 13px", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 11, opacity: 0.75 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13.5, color: C.sub }}>{cv.title}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4, flexWrap: "wrap" }}>
+                        <Tag soft={p.soft} color={p.color}>{p.name}</Tag>
+                        <span style={{ fontSize: 11.5, color: C.faint }}>encerrada em {ddmm(t.until)}</span>
+                      </div>
+                    </div>
+                    <button className="rot-btn" onClick={() => reactivate(t.id)} style={{ padding: "6px 10px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.surface, cursor: "pointer", fontSize: 12, color: C.sub }}>Reativar</button>
+                    <button className="rot-btn" onClick={() => remove(t.id)} style={{ ...iconBtn, width: 32, height: 32, border: "none" }} aria-label="Apagar"><Trash2 size={15} color="#C9C8C2" /></button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       <PeopleEditor peopleRaw={peopleRaw} setPeopleRaw={setPeopleRaw} C={C} />
     </div>
