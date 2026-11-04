@@ -16,8 +16,8 @@ import {
    ========================================================= */
 
 const C = {
-  bg: "#FBFBFA", surface: "#FFFFFF", line: "#ECEBE7", line2: "#E0DFD9",
-  ink: "#26251F", sub: "#6E6D66", faint: "#9B9A94", accent: "#4F46A8",
+  bg: "#F3F5F9", surface: "#FFFFFF", line: "#E2E7F0", line2: "#D3DAE6",
+  ink: "#18233F", sub: "#5A6580", faint: "#8E97AD", accent: "#2348A6",
 };
 const GREEN = { color: "#0E7C61", soft: "#E7F2EC" };
 const AMBER = { color: "#B06A2C", soft: "#FAF0E4" };
@@ -32,7 +32,7 @@ const TYPES = {
   lista: { label: "Feito e quero fazer", hint: "Ex: aproveitar mais a vida", icon: ListChecks },
 };
 const STATUS = {
-  afazer: { label: "a fazer", soft: "#F3F2EF", color: C.faint },
+  afazer: { label: "a fazer", soft: "#EBEFF6", color: C.faint },
   andamento: { label: "em andamento", ...AMBER },
   feito: { label: "feito", ...GREEN },
 };
@@ -55,7 +55,7 @@ const Label = ({ children }) => <div style={{ fontSize: 11.5, color: C.faint, ma
 
 function CheckBox({ on, color = GREEN.color, onClick, size = 20 }) {
   return (
-    <button onClick={onClick} style={{ width: size, height: size, borderRadius: 6, flexShrink: 0, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${on ? color : "#D6D5CF"}`, background: on ? color : "transparent" }}>
+    <button onClick={onClick} style={{ width: size, height: size, borderRadius: 6, flexShrink: 0, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${on ? color : "#C9D1DF"}`, background: on ? color : "transparent" }}>
       {on && <Check size={12} color="#fff" />}
     </button>
   );
@@ -82,8 +82,8 @@ const MONTH_COLORS = {
   ok: { bg: GREEN.color, fg: "#fff" },
   abaixo: { bg: PINK.soft, fg: PINK.color },
   andamento: { bg: AMBER.soft, fg: AMBER.color },
-  pausa: { bg: "#F3F2EF", fg: C.faint },
-  futuro: { bg: "transparent", fg: "#CFCEC8" },
+  pausa: { bg: "#EBEFF6", fg: C.faint },
+  futuro: { bg: "transparent", fg: "#C3CBDA" },
 };
 
 function progressOf(g, year) {
@@ -156,7 +156,7 @@ export default function Metas({ metas = {}, setMetas, owner = { name: "Rafaela",
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
         <button className="rot-btn" onClick={() => { setYear(year - 1); setOpenId(null); }} style={{ ...iconBtn, width: 34, height: 34, border: `1px solid ${C.line}`, background: C.surface }}><ChevronLeft size={18} /></button>
         <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 15, fontWeight: 500 }}>Metas de {year}</div>
+          <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: -0.3, fontFamily: "var(--font-display)" }}>Metas de {year}</div>
           <div style={{ fontSize: 12, color: owner.color }}>{owner.name}</div>
         </div>
         <button className="rot-btn" onClick={() => { setYear(year + 1); setOpenId(null); }} style={{ ...iconBtn, width: 34, height: 34, border: `1px solid ${C.line}`, background: C.surface }}><ChevronRight size={18} /></button>
@@ -184,7 +184,7 @@ export default function Metas({ metas = {}, setMetas, owner = { name: "Rafaela",
       {yd && (
         <>
           {/* Texto de abertura do ano */}
-          <div style={{ ...card, padding: "13px 15px", marginBottom: 14, background: "#F6F5FC", borderColor: "#E4E2F5" }}>
+          <div style={{ ...card, padding: "13px 15px", marginBottom: 14, background: "#EEF3FF", borderColor: "#D9E3FA" }}>
             {editIntro ? (
               <>
                 <textarea autoFocus value={yd.intro || ""} onChange={(e) => updateYear((y) => ({ ...y, intro: e.target.value }))}
@@ -194,7 +194,7 @@ export default function Metas({ metas = {}, setMetas, owner = { name: "Rafaela",
               </>
             ) : (
               <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                <div style={{ flex: 1, fontSize: 13.5, lineHeight: 1.6, color: yd.intro ? "#3A3870" : C.faint, whiteSpace: "pre-wrap" }}>
+                <div style={{ flex: 1, fontSize: 13.5, lineHeight: 1.6, color: yd.intro ? "#1E3570" : C.faint, whiteSpace: "pre-wrap" }}>
                   {yd.intro || "Escreva um recado para você mesma sobre este ano."}
                 </div>
                 <button onClick={() => setEditIntro(true)} title="Editar" style={iconBtn}><Pencil size={14} color={C.faint} /></button>
@@ -203,7 +203,7 @@ export default function Metas({ metas = {}, setMetas, owner = { name: "Rafaela",
           </div>
 
           {goals.length > 0 && (
-            <div style={{ display: "flex", gap: 3, marginBottom: 14, background: "#F3F2EF", padding: 3, borderRadius: 10 }}>
+            <div style={{ display: "flex", gap: 3, marginBottom: 14, background: "#EBEFF6", padding: 3, borderRadius: 10 }}>
               {[["metas", "Metas"], ["ano", "Ano mês a mês"]].map(([k, l]) => {
                 const on = view === k;
                 return <button key={k} onClick={() => setView(k)} style={{ flex: 1, padding: "7px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12.5, fontFamily: "inherit", background: on ? C.surface : "transparent", color: on ? C.ink : C.sub, fontWeight: on ? 500 : 400, boxShadow: on ? "0 1px 3px rgba(0,0,0,0.07)" : "none" }}>{l}</button>;
@@ -218,7 +218,7 @@ export default function Metas({ metas = {}, setMetas, owner = { name: "Rafaela",
           {goals.length > 0 && (
             <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
               {[["feito", "Concluídas"], ["andamento", "Em andamento"], ["afazer", "A fazer"]].map(([k, lbl]) => (
-                <div key={k} style={{ flex: 1, background: "#F3F2EF", borderRadius: 11, padding: "10px 12px" }}>
+                <div key={k} style={{ flex: 1, background: "#EBEFF6", borderRadius: 11, padding: "10px 12px" }}>
                   <div style={{ fontSize: 11.5, color: C.sub, marginBottom: 2 }}>{lbl}</div>
                   <div style={{ fontSize: 20, fontWeight: 500, color: k === "feito" ? GREEN.color : C.ink }}>{counts[k]}</div>
                 </div>
@@ -270,7 +270,7 @@ function yearCell(g, year, m) {
     if (n) return { text: "✓", bg: GREEN.color, fg: "#fff" };
     n = (g.steps || []).filter((st) => st.done && monthOf(st.doneAt, year) === m).length;
   }
-  return n ? { text: String(n), bg: "#EEEDFB", fg: C.accent } : { text: "", bg: "transparent", fg: C.faint };
+  return n ? { text: String(n), bg: "#E3EAFB", fg: C.accent } : { text: "", bg: "transparent", fg: C.faint };
 }
 function yearTotal(g, year) {
   const pr = progressOf(g, year);
@@ -299,7 +299,7 @@ function YearView({ goals, year, counts, openGoal }) {
               <span style={{ color: C.sub }}>{l}</span>
               <span style={{ fontWeight: 500 }}>{l === "Metas concluídas" ? `${counts.feito} de ${goals.length}` : `${v}%`}</span>
             </div>
-            <div style={{ height: 6, background: "#ECEBE7", borderRadius: 99, overflow: "hidden" }}>
+            <div style={{ height: 6, background: "#E2E7F0", borderRadius: 99, overflow: "hidden" }}>
               <div style={{ height: "100%", width: `${v}%`, background: col, borderRadius: 99 }} />
             </div>
           </div>
@@ -326,7 +326,7 @@ function YearView({ goals, year, counts, openGoal }) {
                 {MONTHS.map((mn, i) => {
                   const c = yearCell(g, year, i + 1);
                   return (
-                    <div key={mn} title={mn} style={{ height: 20, borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10.5, fontWeight: 500, background: c.bg === "transparent" ? "#F6F5F2" : c.bg, color: c.fg, outline: isCur(i + 1) ? `1px solid ${C.accent}` : "none", outlineOffset: -1 }}>
+                    <div key={mn} title={mn} style={{ height: 20, borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10.5, fontWeight: 500, background: c.bg === "transparent" ? "#EEF2F8" : c.bg, color: c.fg, outline: isCur(i + 1) ? `1px solid ${C.accent}` : "none", outlineOffset: -1 }}>
                       {c.text}
                     </div>
                   );
@@ -363,7 +363,7 @@ function GoalCard({ g, year, open, onToggle, update, remove, moveUp, moveDown })
             {pr.label && <span style={{ fontSize: 11.5, color: C.faint }}>{pr.label}</span>}
           </div>
           {g.type === "contador" && (
-            <div style={{ height: 4, background: "#ECEBE7", borderRadius: 99, overflow: "hidden", marginTop: 7 }}>
+            <div style={{ height: 4, background: "#E2E7F0", borderRadius: 99, overflow: "hidden", marginTop: 7 }}>
               <div style={{ height: "100%", width: `${pr.pct}%`, background: pr.state === "feito" ? GREEN.color : C.accent, borderRadius: 99 }} />
             </div>
           )}
@@ -380,7 +380,7 @@ function GoalCard({ g, year, open, onToggle, update, remove, moveUp, moveDown })
       </div>
 
       {open && (
-        <div style={{ borderTop: `1px solid ${C.line}`, background: "#FAFAF8", padding: "14px 14px 12px" }}>
+        <div style={{ borderTop: `1px solid ${C.line}`, background: "#F7F9FC", padding: "14px 14px 12px" }}>
           {g.type === "simples" && <SimplesDetail g={g} update={update} />}
           {g.type === "contador" && <ContadorDetail g={g} update={update} />}
           {g.type === "mensal" && <MensalDetail g={g} year={year} update={update} />}
@@ -647,7 +647,7 @@ function NewGoal({ onAdd, onCancel }) {
         {Object.entries(TYPES).map(([k, t]) => {
           const on = type === k; const Ic = t.icon;
           return (
-            <button key={k} onClick={() => setType(k)} style={{ textAlign: "left", padding: "9px 10px", borderRadius: 10, cursor: "pointer", border: `1px solid ${on ? C.accent : C.line}`, background: on ? "#EEEDFB" : C.surface, fontFamily: "inherit" }}>
+            <button key={k} onClick={() => setType(k)} style={{ textAlign: "left", padding: "9px 10px", borderRadius: 10, cursor: "pointer", border: `1px solid ${on ? C.accent : C.line}`, background: on ? "#E3EAFB" : C.surface, fontFamily: "inherit" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 500, color: on ? C.accent : C.ink }}><Ic size={13} /> {t.label}</div>
               <div style={{ fontSize: 11, color: C.faint, marginTop: 3, lineHeight: 1.35 }}>{t.hint}</div>
             </button>
@@ -673,7 +673,7 @@ function NewGoal({ onAdd, onCancel }) {
           <div style={{ display: "flex", gap: 6, marginBottom: 13 }}>
             {[["datas", "Datas (ex: sessões)"], ["texto", "Texto (ex: qual receita)"]].map(([k, l]) => {
               const on = mode === k;
-              return <button key={k} onClick={() => setMode(k)} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${on ? C.accent : C.line}`, background: on ? "#EEEDFB" : C.surface, color: on ? C.accent : C.sub, fontWeight: on ? 500 : 400 }}>{l}</button>;
+              return <button key={k} onClick={() => setMode(k)} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${on ? C.accent : C.line}`, background: on ? "#E3EAFB" : C.surface, color: on ? C.accent : C.sub, fontWeight: on ? 500 : 400 }}>{l}</button>;
             })}
           </div>
         </>
