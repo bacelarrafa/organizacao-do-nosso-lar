@@ -79,6 +79,12 @@ function CheckBox({ on, color = GREEN.color, onClick, size = 22 }) {
   );
 }
 
+// "Lendo agora": itens de uma meta de quantidade que já começaram e não terminaram
+const isBookGoal = (g) => /livr|\bler\b|leitur/i.test(g.title || "");
+const nowWord = (g) => (isBookGoal(g) ? "Lendo agora" : "Em andamento");
+const startWord = (g) => (isBookGoal(g) ? "Começar a ler" : "Começar um");
+const inProgress = (g) => (g.items || []).filter((i) => i.startedAt && !i.doneAt);
+
 // ---------- regras de progresso ----------
 
 function monthCount(g, m) {
@@ -134,7 +140,9 @@ function health(g, year) {
     const target = g.target || 1;
     const pct = Math.min(100, Math.round((n / target) * 100));
     const expectedPct = Math.round(yearFrac(year) * 100);
-    if (n >= target) return { state: "feito", main: `${n} de ${target}. Meta do ano batida!`, pct, expectedPct };
+    const reading = inProgress(g);
+    const now = reading.length ? `${nowWord(g)}: ${reading.map((i) => i.title).join(", ")}` : null;
+    if (n >= target) return { state: "feito", main: `${n} de ${target}. Meta do ano batida!`, sub: now, pct, expectedPct };
     if (year > CUR_YEAR) return { state: "ritmo", main: `${n} de ${target}`, sub: "O ano ainda não começou.", pct, expectedPct };
     const expected = Math.floor(target * yearFrac(year));
     const behind = expected - n;
@@ -143,6 +151,7 @@ function health(g, year) {
       const rem = target - n; const every = Math.max(1, Math.floor(daysLeftInYear() / rem));
       sub = `Faltam ${rem}. Um a cada ${every} ${every === 1 ? "dia" : "dias"} fecha a meta.`;
     }
+    if (now) sub = sub ? `${now}. ${sub}` : now;
     return behind > 0
       ? { state: "atencao", main: `${n} de ${target}, ${behind} atrás do ritmo`, sub, pct, expectedPct }
       : { state: "ritmo", main: `${n} de ${target}, no ritmo`, sub, pct, expectedPct };
@@ -153,6 +162,12 @@ function health(g, year) {
     const hist = eligible ? `${ok} de ${eligible} ${eligible === 1 ? "mês" : "meses"} na meta` : null;
     if (year !== CUR_YEAR) {
       return { state: year < CUR_YEAR && eligible && ok === eligible ? "feito" : "ritmo", main: hist || "Sem registros" };
+    }
+    // Todos os meses que faltam (inclusive o atual) estão em pausa: o hábito já fechou o ano
+    let restPaused = true;
+    for (let m = CUR_MONTH; m <= 12; m++) if (!g.months?.[m]?.pause) restPaused = false;
+    if (restPaused && eligible) {
+      return { state: "feito", main: `Ano fechado: ${ok} de ${eligible} meses na meta`, sub: "Os meses que faltam estão em pausa." };
     }
     const mo = g.months?.[CUR_MONTH] || {};
     const n = monthCount(g, CUR_MONTH);
@@ -501,21 +516,53 @@ function ActionItem({ r, first, update, toast }) {
       );
     }
   } else if (a.kind === "contador") {
-    main = h.state === "atencao" ? h.main : `${h.main}. Terminou mais um?`;
-    btn = <button onClick={() => setOpen(!open)} style={primaryBtn}><Check size={14} /> Terminei um</button>;
-    const pending = (g.items || []).filter((i) => !i.doneAt);
-    body = open && (
+    const reading = inProgress(g);
+    const pending = (g.items || []).filter((i) => !i.doneAt && !i.startedAt);
+    const startItem = (id) => {
+      const it = g.items.find((i) => i.id === id);
+      update((x) => ({ ...x, items: x.items.map((i) => i.id === id ? { ...i, startedAt: TODAY } : i) }));
+      toast(isBookGoal(g) ? `Boa leitura: ${it.title}!` : `Começou: ${it.title}.`); setOpen(false);
+    };
+    const addAndStart = () => {
+      if (!text.trim()) return;
+      update((x) => ({ ...x, items: [...(x.items || []), { id: uid(), title: text.trim(), sub: "", startedAt: TODAY, doneAt: null }] }));
+      toast(isBookGoal(g) ? `Boa leitura: ${text.trim()}!` : `Começou: ${text.trim()}.`); setText(""); setOpen(false);
+    };
+    if (reading.length) {
+      main = <>{nowWord(g)}: <b style={{ fontWeight: 600 }}>{reading.map((i) => i.title).join(", ")}</b></>;
+      btn = reading.length === 1
+        ? <button onClick={() => finishItem(reading[0].id)} style={primaryBtn}><Check size={14} /> Terminei</button>
+        : <button onClick={() => setOpen(open === "fim" ? false : "fim")} style={primaryBtn}><Check size={14} /> Terminei</button>;
+    } else {
+      main = <>{h.main}. {isBookGoal(g) ? "O que você está lendo?" : "Qual é o próximo?"}</>;
+      btn = <button onClick={() => setOpen(open === "ini" ? false : "ini")} style={primaryBtn}><BookOpen size={14} /> {startWord(g)}</button>;
+    }
+    body = (
       <div>
-        {pending.length > 0 && <div style={{ fontSize: 12, color: C.faint, marginBottom: 6 }}>Qual?</div>}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-          {pending.map((i) => (
-            <button key={i.id} className="lar-chip" onClick={() => finishItem(i.id)} style={{ ...softBtn, padding: "6px 11px", fontSize: 12.5, borderRadius: 99 }}>{i.title}</button>
-          ))}
-        </div>
-        <div style={{ display: "flex", gap: 6 }}>
-          <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addAndFinish()} placeholder="Outro (digite o título)" style={{ ...input, flex: 1, minWidth: 0 }} />
-          <button onClick={addAndFinish} style={{ ...primaryBtn, opacity: text.trim() ? 1 : 0.4 }}>Salvar</button>
-        </div>
+        {open === "fim" && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            {reading.map((i) => <button key={i.id} className="lar-chip" onClick={() => finishItem(i.id)} style={{ ...softBtn, padding: "6px 11px", fontSize: 12.5, borderRadius: 99 }}>{i.title}</button>)}
+          </div>
+        )}
+        {open === "ini" && (
+          <>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+              {pending.map((i) => <button key={i.id} className="lar-chip" onClick={() => startItem(i.id)} style={{ ...softBtn, padding: "6px 11px", fontSize: 12.5, borderRadius: 99 }}>{i.title}</button>)}
+            </div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+              <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addAndStart()} placeholder={isBookGoal(g) ? "Outro livro (digite o título)" : "Outro (digite o nome)"} style={{ ...input, flex: 1, minWidth: 0 }} />
+              <button onClick={addAndStart} style={{ ...primaryBtn, opacity: text.trim() ? 1 : 0.4 }}>Salvar</button>
+            </div>
+          </>
+        )}
+        {open === "outro" && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            {pending.map((i) => <button key={i.id} className="lar-chip" onClick={() => finishItem(i.id)} style={{ ...softBtn, padding: "6px 11px", fontSize: 12.5, borderRadius: 99 }}>{i.title}</button>)}
+          </div>
+        )}
+        {open !== "outro" && pending.length > 0 && (
+          <button onClick={() => setOpen("outro")} style={{ ...ghostBtn, fontSize: 12 }}>{reading.length ? "Terminei outro" : "Já terminei um"}</button>
+        )}
       </div>
     );
   } else if (a.kind === "step") {
@@ -785,6 +832,14 @@ function ContadorDetail({ g, update }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13.5, color: it.doneAt ? C.sub : C.ink }}>{it.title}</div>
               {it.sub && <div style={{ fontSize: 11.5, color: C.faint }}>{it.sub}</div>}
+              {!it.doneAt && (it.startedAt ? (
+                <button onClick={() => setItem(it.id, { startedAt: null })} title="Tocar para desmarcar"
+                  style={{ ...ghostBtn, marginTop: 4, display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, color: C.accent, background: C.accentSoft, padding: "2px 8px", borderRadius: 7 }}>
+                  <BookOpen size={11} /> {nowWord(g).toLowerCase()} desde {ddmm(it.startedAt)}
+                </button>
+              ) : (
+                <button onClick={() => setItem(it.id, { startedAt: TODAY })} style={{ ...ghostBtn, marginTop: 3, fontSize: 11.5, color: C.faint }}>{isBookGoal(g) ? "Estou lendo" : "Comecei"}</button>
+              ))}
             </div>
             {it.doneAt && (
               <input type="date" value={it.doneAt} onChange={(e) => setItem(it.id, { doneAt: e.target.value || null })}
