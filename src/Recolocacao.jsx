@@ -13,8 +13,8 @@ import {
    ========================================================= */
 
 const C = {
-  bg: "#FBFBFA", surface: "#FFFFFF", line: "#ECEBE7", line2: "#E0DFD9",
-  ink: "#26251F", sub: "#6E6D66", faint: "#9B9A94", accent: "#4F46A8",
+  bg: "#F3F5F9", surface: "#FFFFFF", line: "#E2E7F0", line2: "#D3DAE6",
+  ink: "#18233F", sub: "#5A6580", faint: "#8E97AD", accent: "#2348A6",
 };
 const PEOPLE = {
   rafa: { name: "Rafaela", color: "#4F46A8" },
@@ -26,8 +26,8 @@ const CHIPS = ["Triagem RH", "Entrevista RH", "Entrevista técnica", "Case", "Fi
 const OUTCOMES = {
   aceito: { label: "aceito 🎉", soft: "#E7F2EC", color: "#0E7C61" },
   recusado: { label: "não seguiu", soft: "#FBEAF1", color: "#C04574" },
-  sem_retorno: { label: "sem retorno", soft: "#F3F2EF", color: C.faint },
-  desisti: { label: "desisti", soft: "#F3F2EF", color: C.sub },
+  sem_retorno: { label: "sem retorno", soft: "#EBEFF6", color: C.faint },
+  desisti: { label: "desisti", soft: "#EBEFF6", color: C.sub },
 };
 
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -135,8 +135,8 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
   const reopen = (id) => upd(id, (x) => ({ ...x, closed: false, outcome: null }));
 
   const btn = { border: `1px solid ${C.line}`, background: C.surface, color: C.sub, fontSize: 12.5, fontWeight: 500, padding: "7px 12px", borderRadius: 9, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "inherit" };
-  const dark = { border: "none", background: C.ink, color: "#FBFBFA", fontSize: 12.5, fontWeight: 500, padding: "8px 13px", borderRadius: 9, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "inherit" };
-  const input = { border: `1px solid ${C.line}`, background: "#FCFCFB", borderRadius: 9, padding: "9px 11px", fontSize: 13.5, fontFamily: "inherit", color: C.ink, width: "100%", outline: "none", boxSizing: "border-box" };
+  const dark = { border: "none", background: C.ink, color: "#F3F5F9", fontSize: 12.5, fontWeight: 500, padding: "8px 13px", borderRadius: 9, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "inherit" };
+  const input = { border: `1px solid ${C.line}`, background: "#F7F9FC", borderRadius: 9, padding: "9px 11px", fontSize: 13.5, fontFamily: "inherit", color: C.ink, width: "100%", outline: "none", boxSizing: "border-box" };
   const iconbtn = { border: "none", background: "transparent", cursor: "pointer", color: C.faint, padding: 4, borderRadius: 8, display: "grid", placeItems: "center" };
 
   const PhaseRow = (x, e, { last }) => {
@@ -165,11 +165,11 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
   };
 
   return (
-    <div style={{ animation: "fade .25s ease", fontFamily: "Inter, system-ui, sans-serif", maxWidth: 560, margin: "0 auto" }}>
-      <style>{`.rec-h:hover{background:#F3F2EF} .rec-tap:hover{background:#F7F6F3} .rec-scope input:focus{border-color:${VAGAS.color}}`}</style>
+    <div style={{ animation: "fade .25s ease", fontFamily: "var(--font-body)", maxWidth: 560, margin: "0 auto" }}>
+      <style>{`.rec-h:hover{background:#EBEFF6} .rec-tap:hover{background:#F5F7FB} .rec-scope input:focus{border-color:${VAGAS.color}}`}</style>
       <div className="rec-scope">
 
-      {flash && <div style={{ position: "sticky", top: 6, zIndex: 20, width: "max-content", maxWidth: "94%", margin: "0 auto 10px", background: C.ink, color: "#FBFBFA", padding: "9px 15px", borderRadius: 999, fontSize: 13, fontWeight: 500, boxShadow: "0 6px 18px rgba(38,37,31,.22)" }}>{flash}</div>}
+      {flash && <div style={{ position: "sticky", top: 6, zIndex: 20, width: "max-content", maxWidth: "94%", margin: "0 auto 10px", background: C.ink, color: "#F3F5F9", padding: "9px 15px", borderRadius: 999, fontSize: 13, fontWeight: 500, boxShadow: "0 6px 18px rgba(38,37,31,.22)" }}>{flash}</div>}
 
       {/* streak */}
       <div style={{ ...card, background: bothMet ? "#FAF0E4" : C.surface, borderColor: bothMet ? "#F0E2C4" : C.line, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14 }}>
@@ -190,14 +190,14 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
               <Dot color={PEOPLE[p].color} />
               <span style={{ fontSize: 14, fontWeight: 500, minWidth: 66 }}>{PEOPLE[p].name}</span>
               <div style={{ display: "flex", gap: 5, flex: 1, alignItems: "center", flexWrap: "wrap" }}>
-                {metaEdit && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#F3F2EF", borderRadius: 999, padding: "1px 5px" }}>
+                {metaEdit && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#EBEFF6", borderRadius: 999, padding: "1px 5px" }}>
                   <button onClick={() => setGoals((s) => ({ ...s, [p]: Math.max(1, s[p] - 1) }))} style={{ ...iconbtn, background: "#fff", width: 17, height: 17, borderRadius: "50%" }}><Minus size={10} /></button>
                   <b style={{ fontSize: 12 }}>{g}</b>
                   <button onClick={() => setGoals((s) => ({ ...s, [p]: s[p] + 1 }))} style={{ ...iconbtn, background: "#fff", width: 17, height: 17, borderRadius: "50%" }}><Plus size={10} /></button>
                 </span>}
                 {!metaEdit && Array.from({ length: g }).map((_, i) => {
                   const fill = i < v;
-                  return <div key={i} onClick={() => (fill ? removeToday(p) : (setNa((s) => ({ ...s, person: p })), setAddOpen(true)))} className="rec-h" style={{ width: 24, height: 24, borderRadius: 7, cursor: "pointer", display: "grid", placeItems: "center", border: `2px solid ${fill ? PEOPLE[p].color : "#D6D5CF"}`, background: fill ? PEOPLE[p].color : "transparent" }}>{fill && <Check size={13} color="#fff" />}</div>;
+                  return <div key={i} onClick={() => (fill ? removeToday(p) : (setNa((s) => ({ ...s, person: p })), setAddOpen(true)))} className="rec-h" style={{ width: 24, height: 24, borderRadius: 7, cursor: "pointer", display: "grid", placeItems: "center", border: `2px solid ${fill ? PEOPLE[p].color : "#C9D1DF"}`, background: fill ? PEOPLE[p].color : "transparent" }}>{fill && <Check size={13} color="#fff" />}</div>;
                 })}
                 {!metaEdit && extra > 0 && <Tag soft={VAGAS.soft} color={VAGAS.color}>+{extra}</Tag>}
                 {!metaEdit && done && <Tag soft="#E7F2EC" color="#0E7C61">meta</Tag>}
@@ -242,7 +242,7 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
       </>}
 
       <SectionTitle icon={Briefcase} color={VAGAS.color} right={<button onClick={() => setAddOpen(true)} style={{ ...btn, padding: "5px 10px", fontSize: 12 }}><Plus size={13} /> novo</button>}>Em andamento</SectionTitle>
-      <div style={{ display: "flex", gap: 3, marginBottom: 12, background: "#F3F2EF", padding: 3, borderRadius: 10 }}>
+      <div style={{ display: "flex", gap: 3, marginBottom: 12, background: "#EBEFF6", padding: 3, borderRadius: 10 }}>
         {[["todos", "Todos", null], ["rafa", "Rafaela", PEOPLE.rafa.color], ["lucas", "Lucas", PEOPLE.lucas.color]].map(([k, label, col]) => {
           const on = filter === k;
           return (
@@ -265,7 +265,7 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
               <button onClick={() => setMenuId(menu ? null : x.id)} style={iconbtn} className="rec-h"><MoreHorizontal size={18} /></button>
             </div>
             {menu && (
-              <div style={{ marginTop: 10, padding: "10px 12px", background: "#F7F6F3", borderRadius: 10 }}>
+              <div style={{ marginTop: 10, padding: "10px 12px", background: "#F5F7FB", borderRadius: 10 }}>
                 <div style={{ fontSize: 11.5, color: C.sub, marginBottom: 8 }}>Encerrar processo como:</div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {Object.keys(OUTCOMES).map((o) => <button key={o} onClick={() => closeProc(x.id, o)} style={{ ...btn, background: "#fff", padding: "5px 10px", fontSize: 11.5, color: OUTCOMES[o].color }}>{OUTCOMES[o].label}</button>)}
@@ -282,7 +282,7 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
               <button onClick={() => { setExpandId(null); setEditEv(null); }} style={{ ...iconbtn, marginTop: 8, marginLeft: 4, fontSize: 12, color: C.sub, fontFamily: "inherit", display: "inline-flex", gap: 4, alignItems: "center" }}><ChevronUp size={13} /> recolher</button>
             )}
             {adding ? (
-              <div style={{ marginTop: 12, padding: "12px", background: "#F7F6F3", borderRadius: 10, display: "flex", flexDirection: "column", gap: 9 }}>
+              <div style={{ marginTop: 12, padding: "12px", background: "#F5F7FB", borderRadius: 10, display: "flex", flexDirection: "column", gap: 9 }}>
                 <input value={draft.label} onChange={(e) => setDraft((d) => ({ ...d, label: e.target.value }))} placeholder="Em que fase você está?" style={{ ...input, padding: "8px 11px" }} autoFocus />
                 <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
                   {CHIPS.map((c) => <button key={c} onClick={() => setDraft((d) => ({ ...d, label: c }))} style={{ ...btn, background: "#fff", padding: "4px 9px", fontSize: 11.5, borderRadius: 999 }}>{c}</button>)}
