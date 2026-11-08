@@ -200,15 +200,20 @@ function parseMercadoPago(pages) {
 
 const PARSERS = { itau: parseItau, nubank: parseNubank, santander: parseSantander, mercadopago: parseMercadoPago };
 
+// Parcelas adiantadas: a mesma compra aparece com várias parcelas na mesma fatura (ex.: 01/04 a 04/04).
+// Essas não se repetem nos próximos meses.
+export function markAnticipated(lines) {
+  const groups = {};
+  lines.forEach((x) => { if (x.parcels > 1) { const g = `${x.key}|${x.date}|${x.desc}|${x.parcels}`; (groups[g] = groups[g] || new Set()).add(x.parcel); } });
+  lines.forEach((x) => { if (x.parcels > 1 && groups[`${x.key}|${x.date}|${x.desc}|${x.parcels}`].size > 1) x.anticipated = true; });
+  return lines;
+}
+
 export function parseFatura(pages) {
   const bank = detectBank(pages);
   if (!bank) return { bank: null, bankName: null, due: null, total: null, cards: [], lines: [], warnings: ["Não reconheci o banco desta fatura. Por enquanto leio Itaú, Nubank, Santander e Mercado Pago."] };
   const r = PARSERS[bank](pages);
-  // Parcelas adiantadas: a mesma compra aparece com várias parcelas na mesma fatura (ex.: 01/04 a 04/04).
-  // Essas não se repetem nos próximos meses.
-  const groups = {};
-  r.lines.forEach((x) => { if (x.parcels > 1) { const g = `${x.key}|${x.date}|${x.desc}|${x.parcels}`; (groups[g] = groups[g] || new Set()).add(x.parcel); } });
-  r.lines.forEach((x) => { if (x.parcels > 1 && groups[`${x.key}|${x.date}|${x.desc}|${x.parcels}`].size > 1) x.anticipated = true; });
+  markAnticipated(r.lines);
   const sum = Math.round(r.lines.reduce((n, x) => n + x.amount, 0) * 100) / 100;
   r.sum = sum;
   if (r.total != null && Math.abs(sum - r.total) > 0.05) r.warnings.push(`A soma dos lançamentos lidos (${sum.toFixed(2).replace(".", ",")}) não bate com o total da fatura (${r.total.toFixed(2).replace(".", ",")}). Confira antes de importar.`);
