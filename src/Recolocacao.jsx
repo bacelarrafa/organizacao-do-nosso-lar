@@ -56,10 +56,22 @@ const SectionTitle = ({ icon: Icon, color, children, right }) => (
   </div>
 );
 
+// Quem está com a recolocação pausada (ex: já conseguiu emprego). Guarda a data da pausa.
+export const pausedOf = (jobsearch = {}) => jobsearch.paused || {};
+export const allPaused = (jobsearch = {}) => ["rafa", "lucas"].every((p) => !!pausedOf(jobsearch)[p]);
+
 export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
   const goals = jobsearch.goals || { rafa: 2, lucas: 2 };
   const procs = jobsearch.procs || [];
   const wins = jobsearch.wins || [];
+  const paused = pausedOf(jobsearch);
+  const activePeople = ["rafa", "lucas"].filter((p) => !paused[p]);
+  const isActive = (p) => !paused[p];
+  const setPaused = (p, on) => setJobsearch((js) => {
+    const cur = { ...(js.paused || {}) };
+    if (on) cur[p] = TODAY; else delete cur[p];
+    return { ...js, paused: cur };
+  });
 
   const setGoals = (u) => setJobsearch((js) => ({ ...js, goals: typeof u === "function" ? u(js.goals || { rafa: 2, lucas: 2 }) : u }));
   const setProcs = (u) => setJobsearch((js) => ({ ...js, procs: typeof u === "function" ? u(js.procs || []) : u }));
@@ -77,19 +89,21 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
   const [metaEdit, setMetaEdit] = useState(false);
   const [filter, setFilter] = useState("todos"); // todos | rafa | lucas
 
-  const combinedGoal = goals.rafa + goals.lucas;
+  const combinedGoal = activePeople.reduce((n, p) => n + goals[p], 0);
   const countDay = (p, day = TODAY) => procs.filter((x) => x.person === p && x.createdAt === day).length;
   const countWeek = (p) => procs.filter((x) => x.person === p && x.createdAt >= daysAgo(6)).length;
 
   const streak = (() => {
-    const by = {}; procs.forEach((x) => { by[x.createdAt] = (by[x.createdAt] || 0) + 1; });
+    if (!activePeople.length) return 0;
+    const by = {}; procs.filter((x) => isActive(x.person)).forEach((x) => { by[x.createdAt] = (by[x.createdAt] || 0) + 1; });
     let s = 0; const d = new Date();
     if ((by[iso(d)] || 0) < combinedGoal) d.setDate(d.getDate() - 1);
     while ((by[iso(d)] || 0) >= combinedGoal) { s++; d.setDate(d.getDate() - 1); }
     return s;
   })();
 
-  const bothMet = countDay("rafa") >= goals.rafa && countDay("lucas") >= goals.lucas;
+  const bothMet = activePeople.length > 0 && activePeople.every((p) => countDay(p) >= goals[p]);
+  const sentActiveToday = activePeople.reduce((n, p) => n + countDay(p), 0);
   const say = (t) => { setFlash(t); setTimeout(() => setFlash(null), 2200); };
   const upd = (id, fn) => setProcs((l) => l.map((x) => (x.id === id ? fn(x) : x)));
 
@@ -108,9 +122,9 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
     if (!na.company.trim()) return;
     const before = countDay(na.person);
     setProcs((l) => [...l, { id: uid(), person: na.person, company: na.company.trim(), role: na.role.trim() || "Vaga", createdAt: TODAY, events: [ev("Currículo enviado", TODAY)], closed: false, outcome: null }]);
-    if (before + 1 === goals[na.person]) {
-      const other = na.person === "rafa" ? "lucas" : "rafa";
-      if (countDay(other) >= goals[other]) { say("Meta dupla registrada hoje 🎉"); setWins((w) => [{ id: uid(), text: "Meta dupla registrada — os dois no ritmo", date: TODAY }, ...w]); }
+    if (isActive(na.person) && before + 1 === goals[na.person]) {
+      const others = activePeople.filter((p) => p !== na.person);
+      if (others.length && others.every((o) => countDay(o) >= goals[o])) { say("Meta dupla registrada hoje 🎉"); setWins((w) => [{ id: uid(), text: "Meta dupla registrada, os dois no ritmo", date: TODAY }, ...w]); }
       else say(`${PEOPLE[na.person].name} bateu a meta de hoje 🎉`);
     } else say(`Processo na ${na.company.trim()} criado`);
     setNa({ person: na.person, company: "", role: "" }); setAddOpen(false);
@@ -171,20 +185,40 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
 
       {flash && <div style={{ position: "sticky", top: 6, zIndex: 20, width: "max-content", maxWidth: "94%", margin: "0 auto 10px", background: C.ink, color: "#F3F5F9", padding: "9px 15px", borderRadius: 999, fontSize: 13, fontWeight: 500, boxShadow: "0 6px 18px rgba(38,37,31,.22)" }}>{flash}</div>}
 
+      {/* tudo pausado */}
+      {activePeople.length === 0 && (
+        <div style={{ ...card, padding: "16px 16px 14px" }}>
+          <div style={{ fontSize: 14.5, fontWeight: 500 }}>Recolocação pausada</div>
+          <div style={{ fontSize: 12.5, color: C.sub, marginTop: 4, lineHeight: 1.5 }}>Ninguém está buscando agora, então não tem meta diária nem sequência. O histórico continua guardado. Retome quando precisar.</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            {["rafa", "lucas"].map((p) => <button key={p} onClick={() => setPaused(p, false)} style={{ ...btn }}><Dot color={PEOPLE[p].color} />Retomar {PEOPLE[p].name}</button>)}
+          </div>
+        </div>
+      )}
+
       {/* streak */}
-      <div style={{ ...card, background: bothMet ? "#FAF0E4" : C.surface, borderColor: bothMet ? "#F0E2C4" : C.line, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14 }}>
+      {activePeople.length > 0 && <div style={{ ...card, background: bothMet ? "#FAF0E4" : C.surface, borderColor: bothMet ? "#F0E2C4" : C.line, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14 }}>
         <div style={{ width: 46, height: 46, borderRadius: 12, background: "#FAF0E4", display: "grid", placeItems: "center", flexShrink: 0 }}><Flame size={22} color={JUNTOS} /></div>
         <div style={{ flex: 1 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}><span style={{ fontSize: 30, fontWeight: 600, color: JUNTOS, lineHeight: 1 }}>{streak}</span><span style={{ fontSize: 13, color: C.sub }}>{streak === 1 ? "dia em movimento" : "dias em movimento"} · juntos</span></div>
-          <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>{bothMet ? "Os dois registraram a meta hoje 💛" : `Faltam ${Math.max(0, combinedGoal - (countDay("rafa") + countDay("lucas")))} pra fechar o dia juntos.`}</div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}><span style={{ fontSize: 30, fontWeight: 600, color: JUNTOS, lineHeight: 1 }}>{streak}</span><span style={{ fontSize: 13, color: C.sub }}>{streak === 1 ? "dia em movimento" : "dias em movimento"}{activePeople.length > 1 ? " (juntos)" : ` (${PEOPLE[activePeople[0]].name})`}</span></div>
+          <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>{bothMet ? (activePeople.length > 1 ? "Os dois registraram a meta hoje 💛" : "Meta de hoje registrada 💛") : `Faltam ${Math.max(0, combinedGoal - sentActiveToday)} pra fechar o dia${activePeople.length > 1 ? " juntos" : ""}.`}</div>
         </div>
-      </div>
+      </div>}
 
       {/* enviados hoje */}
+      {activePeople.length > 0 && <>
       <SectionTitle icon={TrendingUp} color={VAGAS.color}>Enviados hoje</SectionTitle>
       <div style={{ ...card, padding: "6px 15px 13px" }}>
         {["rafa", "lucas"].map((p, ix) => {
           const v = countDay(p); const g = goals[p]; const done = v >= g; const extra = Math.max(0, v - g);
+          if (!isActive(p)) return (
+            <div key={p} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 0", borderBottom: ix === 0 ? `1px solid ${C.line}` : "none" }}>
+              <Dot color={PEOPLE[p].color} />
+              <span style={{ fontSize: 14, fontWeight: 500, minWidth: 66, color: C.sub }}>{PEOPLE[p].name}</span>
+              <span style={{ flex: 1, fontSize: 12.5, color: C.faint }}>pausada desde {fmtDate(paused[p])}{v > 0 ? ` (${v} hoje, fora da meta)` : ""}</span>
+              <button onClick={() => setPaused(p, false)} style={{ ...btn, padding: "6px 11px" }}>retomar</button>
+            </div>
+          );
           return (
             <div key={p} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 0", borderBottom: ix === 0 ? `1px solid ${C.line}` : "none" }}>
               <Dot color={PEOPLE[p].color} />
@@ -195,6 +229,7 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
                   <b style={{ fontSize: 12 }}>{g}</b>
                   <button onClick={() => setGoals((s) => ({ ...s, [p]: s[p] + 1 }))} style={{ ...iconbtn, background: "#fff", width: 17, height: 17, borderRadius: "50%" }}><Plus size={10} /></button>
                 </span>}
+                {metaEdit && <button onClick={() => setPaused(p, true)} style={{ ...btn, padding: "4px 10px", fontSize: 11.5 }}>pausar busca</button>}
                 {!metaEdit && Array.from({ length: g }).map((_, i) => {
                   const fill = i < v;
                   return <div key={i} onClick={() => (fill ? removeToday(p) : (setNa((s) => ({ ...s, person: p })), setAddOpen(true)))} className="rec-h" style={{ width: 24, height: 24, borderRadius: 7, cursor: "pointer", display: "grid", placeItems: "center", border: `2px solid ${fill ? PEOPLE[p].color : "#C9D1DF"}`, background: fill ? PEOPLE[p].color : "transparent" }}>{fill && <Check size={13} color="#fff" />}</div>;
@@ -207,11 +242,12 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
           );
         })}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 11, fontSize: 11.5, color: C.faint }}>
-          <span>meta {goals.rafa === goals.lucas ? `${goals.rafa}/dia por pessoa` : `${goals.rafa} e ${goals.lucas}/dia`}</span>
-          <button onClick={() => setMetaEdit(!metaEdit)} style={{ ...iconbtn, fontSize: 11.5, color: VAGAS.color, fontFamily: "inherit", padding: "2px 4px" }}>{metaEdit ? "pronto" : "ajustar"}</button>
+          <span>{activePeople.length === 0 ? "sem meta ativa" : activePeople.length === 1 ? `meta ${goals[activePeople[0]]}/dia (${PEOPLE[activePeople[0]].name})` : goals.rafa === goals.lucas ? `meta ${goals.rafa}/dia por pessoa` : `meta ${goals.rafa} e ${goals.lucas}/dia`}</span>
+          {activePeople.length > 0 && <button onClick={() => setMetaEdit(!metaEdit)} style={{ ...iconbtn, fontSize: 11.5, color: VAGAS.color, fontFamily: "inherit", padding: "2px 4px" }}>{metaEdit ? "pronto" : "ajustar ou pausar"}</button>}
           <span style={{ marginLeft: "auto" }}>{countWeek("rafa") + countWeek("lucas")} nos últimos 7 dias</span>
         </div>
       </div>
+      </>}
 
       {addOpen && (
         <div style={{ ...card, padding: "14px 15px", marginTop: 10, display: "flex", flexDirection: "column", gap: 10, borderStyle: "dashed", borderColor: VAGAS.color }}>
@@ -220,7 +256,7 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
             {["rafa", "lucas"].map((p) => <button key={p} onClick={() => setNa((s) => ({ ...s, person: p }))} style={{ flex: 1, ...btn, justifyContent: "center", borderColor: na.person === p ? PEOPLE[p].color : C.line, color: na.person === p ? C.ink : C.sub, boxShadow: na.person === p ? `inset 0 0 0 1px ${PEOPLE[p].color}` : "none" }}><Dot color={PEOPLE[p].color} />{PEOPLE[p].name}</button>)}
           </div>
           <input style={input} placeholder="Empresa" value={na.company} onChange={(e) => setNa((s) => ({ ...s, company: e.target.value }))} autoFocus />
-          <input style={input} placeholder="Vaga (ex: PM Pleno)" value={na.role} onChange={(e) => setNa((s) => ({ ...s, role: e.target.value }))} />
+          <input style={input} placeholder="Vaga (opcional)" value={na.role} onChange={(e) => setNa((s) => ({ ...s, role: e.target.value }))} />
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setAddOpen(false)} style={{ ...btn, flex: 1, justifyContent: "center" }}>cancelar</button>
             <button onClick={createProc} style={{ ...dark, flex: 2, justifyContent: "center", padding: "9px" }}>criar processo</button>
@@ -252,7 +288,7 @@ export default function Recolocacao({ jobsearch = {}, setJobsearch }) {
           );
         })}
       </div>
-      {active.length === 0 && <div style={{ ...card, padding: "20px", textAlign: "center", color: C.faint, fontSize: 13, borderStyle: "dashed" }}>{filter === "todos" ? 'Nenhum processo ainda. Toque em "enviei" quando mandar um currículo — o processo nasce aqui.' : `Nenhum processo em andamento de ${PEOPLE[filter].name}.`}</div>}
+      {active.length === 0 && <div style={{ ...card, padding: "20px", textAlign: "center", color: C.faint, fontSize: 13, borderStyle: "dashed" }}>{filter === "todos" ? 'Nenhum processo ainda. Toque em "enviei" quando mandar um currículo, o processo nasce aqui.' : `Nenhum processo em andamento de ${PEOPLE[filter].name}.`}</div>}
       {active.map((x) => {
         const expanded = expandId === x.id; const adding = phaseFor === x.id; const menu = menuId === x.id;
         const phases = phasesOf(x); const cur = currentOf(x); const nxt = nextOf(x);
