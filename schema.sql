@@ -17,8 +17,15 @@ create table if not exists households (
   templates   jsonb not null default '[]',  -- tarefas recorrentes
   weeks       jsonb not null default '{}',  -- estado por semana (feito, presencial, refeições...)
   people      jsonb not null default '{}',  -- nomes e cores das pessoas
+  jobsearch   jsonb not null default '{}',  -- aba Recolocação
+  metas       jsonb not null default '{}',  -- aba Metas
   updated_at  timestamptz not null default now()
 );
+
+-- Para bancos criados antes dessas colunas existirem
+alter table households add column if not exists jobsearch jsonb not null default '{}';
+alter table households add column if not exists metas jsonb not null default '{}';
+-- Login e regras de acesso (rotina e finanças): veja schema-seguranca.sql
 
 -- Atualiza updated_at automaticamente a cada alteração
 create or replace function touch_household()
