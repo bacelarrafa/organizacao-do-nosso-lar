@@ -6,10 +6,22 @@ import {
 } from "lucide-react";
 
 const SEED_PEOPLE = {
-  rafa: { name: "Rafaela", color: "#4F46A8", role: "PM · Turbi" },
-  lucas: { name: "Lucas", color: "#0E7C61", role: "Eng. de dados · Pitzi" },
-  both: { name: "Juntos", color: "#B06A2C", role: "Os dois" },
+  rafa: { name: "Rafaela", color: "#4F46A8" },
+  lucas: { name: "Lucas", color: "#0E7C61" },
+  both: { name: "Juntos", color: "#B06A2C" },
 };
+
+// Remove o campo antigo de cargo ("role") das pessoas salvas no banco.
+// Na próxima gravação qualquer, o banco já fica limpo.
+function cleanPeople(people) {
+  if (!people || !Object.keys(people).length) return SEED_PEOPLE;
+  const out = {};
+  for (const k of Object.keys(people)) {
+    const { role, ...rest } = people[k] || {};
+    out[k] = rest;
+  }
+  return out;
+}
 
 function softOf(hex) {
   const h = hex.replace("#", "");
@@ -188,7 +200,7 @@ function daysBetween(a, b) {
 const EMPTY_WEEK = { done: {}, presence: {}, skip: {}, move: {}, add: {}, meals: {}, appts: [], wins: "", extras: [], assign: {} };
 
 import { supabase } from "./supabaseClient";
-import Recolocacao from "./Recolocacao";
+import Recolocacao, { allPaused } from "./Recolocacao";
 import Metas from "./Metas";
 
 // One household row holds everything. We load it once, subscribe to
@@ -225,7 +237,7 @@ function useHousehold(code) {
           setData({
             templates: row.templates?.length ? row.templates : SEED_TEMPLATES,
             weeks: row.weeks || {},
-            people: row.people && Object.keys(row.people).length ? row.people : SEED_PEOPLE,
+            people: cleanPeople(row.people),
             jobsearch: row.jobsearch || {},
             metas: row.metas || {},
           });
@@ -246,7 +258,7 @@ function useHousehold(code) {
           setData({
             templates: r.templates || SEED_TEMPLATES,
             weeks: r.weeks || {},
-            people: r.people && Object.keys(r.people).length ? r.people : SEED_PEOPLE,
+            people: cleanPeople(r.people),
             jobsearch: r.jobsearch || {},
             metas: r.metas || {},
           });
@@ -573,14 +585,16 @@ function Routine() {
   const SECTIONS = [
     { id: "hoje", label: "Hoje", icon: Sun, tabs: [["hoje", "Hoje"]] },
     { id: "semana", label: "Semana", icon: CalendarDays, tabs: [["semana", "Agenda"], ["presencial", "Presencial"], ["saude", "Refeições e saúde"]] },
-    { id: "planos", label: "Planos", icon: Target, tabs: [["metas", `Metas ${PEOPLE.rafa.name}`], ["vagas", "Recolocação"]] },
+    // Recolocação some da navegação quando os dois pausaram a busca (dá pra retomar pela aba Metas)
+    { id: "planos", label: "Planos", icon: Target, tabs: [["metas", `Metas ${PEOPLE.rafa.name}`], ...(allPaused(jobsearch) && tab !== "vagas" ? [] : [["vagas", "Recolocação"]])] },
     { id: "casa", label: "Casa", icon: Home, tabs: [["rotina", "Rotina"], ["historico", "Histórico"]] },
   ];
   const section = SECTIONS.find((s) => s.tabs.some(([id]) => id === tab)) || SECTIONS[0];
-  const goTab = (id) => { setTab(id); setLastTab((m) => ({ ...m, [SECTIONS.find((s) => s.tabs.some(([x]) => x === id)).id]: id })); };
+  const goTab = (id) => { const sec = SECTIONS.find((s) => s.tabs.some(([x]) => x === id)) || section; setTab(id); setLastTab((m) => ({ ...m, [sec.id]: id })); };
   const goSection = (s) => {
     if (s.id === "hoje") setDayOffset(0);
-    setTab(lastTab[s.id] || s.tabs[0][0]);
+    const last = lastTab[s.id];
+    setTab(last && s.tabs.some(([x]) => x === last) ? last : s.tabs[0][0]);
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   };
   const todayCounts = countsOn(today);
@@ -628,7 +642,15 @@ function Routine() {
 
       {/* ---------- METAS PESSOAIS ---------- */}
       {tab === "metas" && (
-        <Metas metas={metas} setMetas={setMetas} owner={PEOPLE.rafa} />
+        <>
+          <Metas metas={metas} setMetas={setMetas} owner={PEOPLE.rafa} />
+          {allPaused(jobsearch) && (
+            <div style={{ marginTop: 22, textAlign: "center", fontSize: 12.5, color: C.faint }}>
+              Recolocação pausada.{" "}
+              <button onClick={() => goTab("vagas")} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 12.5, color: C.accent, fontFamily: "inherit" }}>Abrir para retomar</button>
+            </div>
+          )}
+        </>
       )}
 
       {/* ---------- HOJE ---------- */}
@@ -934,7 +956,7 @@ function Routine() {
               <div key={person} style={{ ...card, padding: "14px 16px", marginBottom: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 12 }}>
                   <div style={{ width: 28, height: 28, borderRadius: 9, background: p.soft, display: "flex", alignItems: "center", justifyContent: "center" }}><User size={14} color={p.color} /></div>
-                  <div><div style={{ fontSize: 13.5, fontWeight: 500 }}>{p.name}</div><div style={{ fontSize: 11.5, color: C.faint }}>{p.role}</div></div>
+                  <div style={{ fontSize: 13.5, fontWeight: 500 }}>{p.name}</div>
                 </div>
                 <div style={{ display: "flex", gap: 6 }}>
                   {DAYS.map((d, i) => {
@@ -1751,10 +1773,6 @@ function PeopleEditor({ peopleRaw, setPeopleRaw, C }) {
                 <input value={p.name} onChange={(e) => update(key, "name", e.target.value)} placeholder="nome"
                   style={{ flex: 1, boxSizing: "border-box", padding: "9px 11px", borderRadius: 9, border: `1px solid ${C.line}`, fontSize: 13.5, outline: "none" }} />
               </div>
-              {key !== "both" && (
-                <input value={p.role || ""} onChange={(e) => update(key, "role", e.target.value)} placeholder="papel (ex: PM · Turbi) — opcional"
-                  style={{ width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 9, border: `1px solid ${C.line}`, fontSize: 12.5, outline: "none", marginBottom: 10, color: C.sub }} />
-              )}
               <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
                 {PERSON_COLORS.map((c) => (
                   <button key={c} onClick={() => update(key, "color", c)} aria-label={`cor ${c}`}
