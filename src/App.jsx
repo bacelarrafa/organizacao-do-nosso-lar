@@ -650,7 +650,7 @@ function Routine({ email }) {
 
       {/* ---------- FINANÇAS ---------- */}
       {tab.startsWith("fin-") && (
-        <Financas code={code} view={tab} email={email} onGo={(id) => { goTab(id); if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+        <Financas code={code} view={tab} email={email} casal={`${PEOPLE.rafa.name} e ${PEOPLE.lucas.name}`} onGo={(id) => { goTab(id); if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" }); }} />
       )}
 
       {/* ---------- METAS PESSOAIS ---------- */}
