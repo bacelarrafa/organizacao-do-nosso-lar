@@ -239,7 +239,7 @@ function blankCopy(g) {
   return { ...base, items: [] };
 }
 
-export default function Metas({ metas = {}, setMetas, owner = { name: "Rafaela", color: C.accent } }) {
+export default function Metas({ metas = {}, setMetas, owner = { name: "Rafaela", color: C.accent }, eventsFor = () => [], onSchedule = null }) {
   const [year, setYear] = useState(CUR_YEAR);
   const [openId, setOpenId] = useState(null);
   const [view, setView] = useState("metas"); // metas | ano
@@ -409,6 +409,7 @@ export default function Metas({ metas = {}, setMetas, owner = { name: "Rafaela",
                     const idx = goals.findIndex((x) => x.id === g.id);
                     return (
                       <GoalRow key={g.id} g={g} h={h} year={year} open={openId === g.id}
+                        events={eventsFor(year, g.id)} onSchedule={onSchedule ? () => onSchedule(year, g.id) : null}
                         onToggle={() => setOpenId(openId === g.id ? null : g.id)}
                         update={(fn) => updateGoal(g.id, fn)} toast={setToast}
                         remove={() => removeGoal(g.id)}
@@ -600,7 +601,8 @@ function ActionItem({ r, first, update, toast }) {
 }
 
 // ---------- cartão de uma meta ----------
-function GoalRow({ g, h, year, open, onToggle, update, toast, remove, moveUp, moveDown }) {
+function GoalRow({ g, h, year, open, onToggle, update, toast, remove, moveUp, moveDown, events = [], onSchedule }) {
+  const nextEv = events.find((e) => !e.status && e.date >= TODAY);
   const T = TYPES[g.type] || TYPES.simples; const Ic = T.icon; const H = HEALTH[h.state];
   const [renaming, setRenaming] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
@@ -617,6 +619,7 @@ function GoalRow({ g, h, year, open, onToggle, update, toast, remove, moveUp, mo
           <div style={{ fontSize: 14.5, fontWeight: 600, lineHeight: 1.3 }}>{g.title}</div>
           <div style={{ fontSize: 13, color: h.state === "atencao" ? AMBER.color : h.state === "feito" ? GREEN.color : C.sub, marginTop: 3, fontWeight: 500 }}>{h.main}</div>
           {h.sub && <div style={{ fontSize: 12, color: C.faint, marginTop: 2, lineHeight: 1.4 }}>{h.sub}</div>}
+          {nextEv && <div style={{ fontSize: 12, color: C.accent, marginTop: 4, display: "flex", alignItems: "center", gap: 5 }}><CalendarDays size={12} /> {nextEv.title}, {ddmm(nextEv.date)}</div>}
 
           {g.type === "contador" && (
             <div style={{ position: "relative", height: 8, background: "#EBEFF6", borderRadius: 99, marginTop: 9 }}>
@@ -650,6 +653,22 @@ function GoalRow({ g, h, year, open, onToggle, update, toast, remove, moveUp, mo
           {g.type === "contador" && <ContadorDetail g={g} update={update} />}
           {g.type === "mensal" && <MensalDetail g={g} year={year} update={update} />}
           {g.type === "lista" && <ListaDetail g={g} update={update} />}
+
+          {(events.length > 0 || onSchedule) && (
+            <div style={{ marginTop: 14 }}>
+              <Label>Na agenda</Label>
+              {events.map((e) => (
+                <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 13 }}>
+                  <span style={{ width: 42, color: C.faint, fontSize: 12 }}>{ddmm(e.date)}</span>
+                  <span style={{ flex: 1, color: e.status === "cancelado" ? C.faint : C.ink, textDecoration: e.status === "cancelado" ? "line-through" : "none" }}>{e.title}</span>
+                  {e.status === "feito" && <Tag soft={GREEN.soft} color={GREEN.color}><Check size={11} /> contou</Tag>}
+                  {!e.status && e.date < TODAY && <Tag soft={AMBER.soft} color={AMBER.color}>confirmar na agenda</Tag>}
+                </div>
+              ))}
+              {events.length === 0 && <div style={{ fontSize: 12.5, color: C.faint, marginBottom: 4 }}>Agende aulas, sessões ou experiências desta meta. Quando acontecerem, contam aqui sozinhas.</div>}
+              {onSchedule && <button onClick={onSchedule} style={{ ...softBtn, marginTop: 6, padding: "6px 11px", fontSize: 12.5 }}><Plus size={13} /> Agendar</button>}
+            </div>
+          )}
 
           <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 16, paddingTop: 11, borderTop: `1px solid ${C.line}`, flexWrap: "wrap" }}>
             {renaming ? (
