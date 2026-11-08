@@ -203,13 +203,14 @@ import { supabase } from "./supabaseClient";
 import Recolocacao, { allPaused } from "./Recolocacao";
 import Metas from "./Metas";
 import Financas from "./Financas";
+import Agenda, { eventsOn, eventsOfGoal } from "./Agenda";
 import { useSession, LoginScreen } from "./Login";
 
 // One household row holds everything. We load it once, subscribe to
 // realtime changes (so the other person's edits appear live), and
 // write back debounced. The shape mirrors the original three blobs:
 // { templates, weeks, people }.
-const EMPTY = { templates: SEED_TEMPLATES, weeks: {}, people: SEED_PEOPLE, jobsearch: {}, metas: {} };
+const EMPTY = { templates: SEED_TEMPLATES, weeks: {}, people: SEED_PEOPLE, jobsearch: {}, metas: {}, agenda: {} };
 
 function useHousehold(code) {
   const [data, setData] = useState(EMPTY);
@@ -242,6 +243,7 @@ function useHousehold(code) {
             people: cleanPeople(row.people),
             jobsearch: row.jobsearch || {},
             metas: row.metas || {},
+            agenda: row.agenda || {},
           });
         }
         setLoaded(true);
@@ -263,6 +265,7 @@ function useHousehold(code) {
             people: cleanPeople(r.people),
             jobsearch: r.jobsearch || {},
             metas: r.metas || {},
+            agenda: r.agenda || {},
           });
         })
       .subscribe();
@@ -275,7 +278,7 @@ function useHousehold(code) {
     saveTimer.current = setTimeout(async () => {
       skipNextRealtime.current = true;
       const { error: upErr } = await supabase.from("households")
-        .update({ templates: next.templates, weeks: next.weeks, people: next.people, jobsearch: next.jobsearch, metas: next.metas })
+        .update({ templates: next.templates, weeks: next.weeks, people: next.people, jobsearch: next.jobsearch, metas: next.metas, agenda: next.agenda })
         .eq("code", code);
       if (upErr) setError(upErr.message);
     }, 500);
@@ -296,6 +299,7 @@ function useHousehold(code) {
     peopleRaw: data.people, setPeopleRaw: makeSetter("people"),
     jobsearch: data.jobsearch, setJobsearch: makeSetter("jobsearch"),
     metas: data.metas, setMetas: makeSetter("metas"),
+    agenda: data.agenda, setAgenda: makeSetter("agenda"),
     loaded, error,
   };
 }
@@ -330,7 +334,18 @@ function Routine({ email }) {
   // Na aba Hoje, a semana é a do dia escolhido; nas outras, a do navegador de semanas.
   const wid = tab === "hoje" ? mondayStrOf(selDate) : weekId(offset);
 
-  const { templates, setTemplates, weeks, setWeeks, peopleRaw, setPeopleRaw, jobsearch, setJobsearch, metas, setMetas, loaded, error } = useHousehold(code);
+  const { templates, setTemplates, weeks, setWeeks, peopleRaw, setPeopleRaw, jobsearch, setJobsearch, metas, setMetas, agenda, setAgenda, loaded, error } = useHousehold(code);
+  const [agendaPrefill, setAgendaPrefill] = useState(null);
+  // Uma vez só: compromissos antigos da aba de saúde viram eventos da agenda
+  useEffect(() => {
+    if (!loaded || agenda?.migrated) return;
+    const evs = [];
+    Object.entries(weeks || {}).forEach(([w, wk]) => (wk.appts || []).forEach((a) => {
+      if (a.day == null || !a.title) return;
+      evs.push({ id: `old-${w}-${a.day}-${evs.length}`, title: a.title, date: addDays(w, a.day), time: "", who: a.who || "both", note: a.when || "", meta: null, status: null });
+    }));
+    setAgenda((ag) => ({ ...(ag || {}), migrated: true, events: [...((ag && ag.events) || []), ...evs] }));
+  }, [loaded]);
 
   const PEOPLE = useMemo(() => {
     const out = {};
@@ -450,49 +465,6 @@ function Routine({ email }) {
     });
   };
 
-  const togglePresence = (person, d) => {
-    const cur = week.presence[person] || [];
-    const next = cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d];
-    patchWeek({ presence: { ...week.presence, [person]: next } });
-  };
-
-  // ---- Presence-aware suggestions ----
-  // If a flexible "juntos" task lands on a day where someone is at the office,
-  // suggest moving it to the nearest day both are home.
-  const suggestions = useMemo(() => {
-    const out = [];
-    const rafaOut = week.presence.rafa || [];
-    const lucasOut = week.presence.lucas || [];
-    const bothHome = (d) => !rafaOut.includes(d) && !lucasOut.includes(d);
-    templates.forEach((t) => {
-      if (!rowVer(t).flexible) return;
-      const days = effectiveDays(t);
-      days.forEach((d) => {
-        const needsBoth = verAt(t, d).who === "both";
-        const clash = needsBoth ? (rafaOut.includes(d) || lucasOut.includes(d)) : false;
-        if (!clash) return;
-        const whoOut = [];
-        if (rafaOut.includes(d)) whoOut.push("rafa");
-        if (lucasOut.includes(d)) whoOut.push("lucas");
-        // find nearest earlier home day, else nearest later
-        let best = null;
-        for (let delta = 1; delta <= 6; delta++) {
-          const earlier = d - delta;
-          if (earlier >= 0 && bothHome(earlier) && !days.includes(earlier)) { best = earlier; break; }
-          const later = d + delta;
-          if (later <= 6 && bothHome(later) && !days.includes(later)) { best = later; break; }
-        }
-        out.push({ task: t, from: d, to: best, whoOut });
-      });
-    });
-    return out;
-  }, [templates, week, effectiveDays]);
-
-  const applyMove = (taskId, from, to) => {
-    const t = templates.find((x) => x.id === taskId);
-    moveTaskOcc(t, addDays(wid, from), to === null ? null : addDays(wid, to));
-  };
-
   // ---- Stats ----
   const stats = useMemo(() => {
     let total = 0, done = 0;
@@ -591,7 +563,7 @@ function Routine({ email }) {
   // Navegação em 4 seções; cada seção pode ter abas internas
   const SECTIONS = [
     { id: "hoje", label: "Hoje", icon: Sun, tabs: [["hoje", "Hoje"]] },
-    { id: "semana", label: "Semana", icon: CalendarDays, tabs: [["semana", "Agenda"], ["presencial", "Presencial"], ["saude", "Refeições e saúde"]] },
+    { id: "semana", label: "Semana", icon: CalendarDays, tabs: [["semana", "Tarefas"], ["agenda", "Agenda"]] },
     // Recolocação some da navegação quando os dois pausaram a busca (dá pra retomar pela aba Metas)
     { id: "planos", label: "Planos", icon: Target, tabs: [["metas", `Metas ${PEOPLE.rafa.name}`], ...(allPaused(jobsearch) && tab !== "vagas" ? [] : [["vagas", "Recolocação"]])] },
     { id: "financas", label: "Finanças", icon: Wallet, tabs: [["fin-mes", "Mês"], ["fin-painel", "Painel"], ["fin-cartoes", "Cartões"], ["fin-parcelas", "Parcelas"], ["fin-cobrancas", "A receber"], ["fin-cadastros", "Cadastros"]] },
@@ -632,7 +604,7 @@ function Routine({ email }) {
       )}
 
       {/* Week navigator (shared by several tabs) */}
-      {["semana", "presencial", "saude"].includes(tab) && (
+      {tab === "semana" && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
           <button className="rot-btn" onClick={() => setOffset(offset - 1)} style={{ ...iconBtn }}><ChevronLeft size={18} /></button>
           <div style={{ textAlign: "center" }}>
@@ -648,6 +620,12 @@ function Routine({ email }) {
         <Recolocacao jobsearch={jobsearch} setJobsearch={setJobsearch} />
       )}
 
+      {/* ---------- AGENDA ---------- */}
+      {tab === "agenda" && (
+        <Agenda agenda={agenda} setAgenda={setAgenda} metas={metas} setMetas={setMetas} PEOPLE={PEOPLE}
+          prefill={agendaPrefill} clearPrefill={() => setAgendaPrefill(null)} />
+      )}
+
       {/* ---------- FINANÇAS ---------- */}
       {tab.startsWith("fin-") && (
         <Financas code={code} view={tab} email={email} casal={`${PEOPLE.rafa.name} e ${PEOPLE.lucas.name}`} onGo={(id) => { goTab(id); if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" }); }} />
@@ -656,7 +634,9 @@ function Routine({ email }) {
       {/* ---------- METAS PESSOAIS ---------- */}
       {tab === "metas" && (
         <>
-          <Metas metas={metas} setMetas={setMetas} owner={PEOPLE.rafa} />
+          <Metas metas={metas} setMetas={setMetas} owner={PEOPLE.rafa}
+            eventsFor={(year, goalId) => eventsOfGoal(agenda, year, goalId)}
+            onSchedule={(year, goalId) => { setAgendaPrefill({ meta: { year, goalId } }); goTab("agenda"); }} />
           {allPaused(jobsearch) && (
             <div style={{ marginTop: 22, textAlign: "center", fontSize: 12.5, color: C.faint }}>
               Recolocação pausada.{" "}
@@ -685,19 +665,9 @@ function Routine({ email }) {
             return all ? <DayDone key={selDate} isToday={dayOffset === 0} /> : null;
           })()}
 
-          {/* presence-aware nudge */}
-          {suggestions.filter((s) => s.from === di || effectiveDays(s.task).includes(di)).length === 0 && suggestions.length > 0 && (
-            <div style={{ ...card, padding: "12px 14px", marginBottom: 14, background: "#FFF9EE", borderColor: "#F0E2C4", display: "flex", gap: 10 }}>
-              <Lightbulb size={17} color="#B06A2C" style={{ flexShrink: 0, marginTop: 1 }} />
-              <div style={{ fontSize: 13, color: "#7A4E18", lineHeight: 1.5 }}>
-                Há ajustes sugeridos para esta semana por causa dos dias presenciais. Veja na aba <b style={{ fontWeight: 500 }}>Presencial</b>.
-              </div>
-            </div>
-          )}
-
           {(() => {
             const order = ["rafa", "lucas", "both"];
-            const dayAppts = (week.appts || []).filter((a) => a.day === di);
+            const dayAppts = eventsOn(agenda, selDate).map((e) => ({ title: e.title, when: [e.time, e.note].filter(Boolean).join(", "), who: e.who }));
             const groups = order.map((pk) => ({
               pk,
               tasks: todayTasks.filter((t) => assignFor(t, di) === pk),
@@ -807,10 +777,10 @@ function Routine({ email }) {
                         })}
                         {g.appts.map((a, ai) => (
                           <div key={"a" + ai} style={{ ...card, display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", background: "#FBEAF1", borderColor: "#F2D2DF" }}>
-                            <Stethoscope size={17} color="#C04574" style={{ flexShrink: 0 }} />
+                            <CalendarDays size={17} color="#C04574" style={{ flexShrink: 0 }} />
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontSize: 14.5 }}>{a.title}</div>
-                              <div style={{ fontSize: 11.5, color: "#8A2E4E", marginTop: 2 }}>{a.when || "compromisso"}</div>
+                              <div style={{ fontSize: 11.5, color: "#8A2E4E", marginTop: 2 }}>{a.when || "na agenda"}</div>
                             </div>
                           </div>
                         ))}
@@ -932,172 +902,30 @@ function Routine({ email }) {
             </div>
           )}
 
-          {/* Compromissos da semana (eventos por pessoa) */}
-          {(week.appts || []).some((a) => a.day != null) && (
-            <div style={{ marginTop: 18 }}>
-              <SectionTitle icon={Stethoscope} color="#C04574">Compromissos da semana</SectionTitle>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {(week.appts || []).filter((a) => a.day != null).slice().sort((a, b) => a.day - b.day).map((a, idx) => {
-                  const pp = PEOPLE[a.who] || {};
-                  return (
-                    <div key={idx} style={{ ...card, padding: "11px 13px", display: "flex", alignItems: "center", gap: 11 }}>
-                      <div style={{ width: 40, textAlign: "center", fontSize: 12, fontWeight: 500, color: C.sub }}>{DAYS[a.day]}</div>
-                      <Stethoscope size={15} color="#C04574" style={{ flexShrink: 0 }} />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13.5 }}>{a.title}</div>
-                        <div style={{ fontSize: 11.5, color: C.faint }}>{a.when ? a.when + " · " : ""}<span style={{ color: pp.color }}>{pp.name || ""}</span></div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ---------- PRESENCIAL ---------- */}
-      {tab === "presencial" && (
-        <div style={{ animation: "fade .25s ease" }}>
-          <p style={{ fontSize: 13.5, color: C.sub, lineHeight: 1.55, margin: "0 0 16px" }}>
-            Marque os dias que cada um vai ao escritório <b style={{ fontWeight: 500 }}>nesta semana</b>. Quando um dia presencial bater com uma tarefa que depende dos dois, o sistema sugere mover.
-          </p>
-
-          {["rafa", "lucas"].map((person) => {
-            const p = PEOPLE[person];
+          {/* Eventos da semana, vindos da aba Agenda */}
+          {(() => {
+            const evs = [0, 1, 2, 3, 4, 5, 6].flatMap((d) => eventsOn(agenda, addDays(wid, d)).map((e) => ({ ...e, d })));
+            if (!evs.length) return null;
             return (
-              <div key={person} style={{ ...card, padding: "14px 16px", marginBottom: 12 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 12 }}>
-                  <div style={{ width: 28, height: 28, borderRadius: 9, background: p.soft, display: "flex", alignItems: "center", justifyContent: "center" }}><User size={14} color={p.color} /></div>
-                  <div style={{ fontSize: 13.5, fontWeight: 500 }}>{p.name}</div>
-                </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  {DAYS.map((d, i) => {
-                    const on = (week.presence[person] || []).includes(i);
+              <div style={{ marginTop: 18 }}>
+                <SectionTitle icon={CalendarDays} color="#C04574">Na agenda desta semana</SectionTitle>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {evs.map((e) => {
+                    const pp = PEOPLE[e.who] || {};
                     return (
-                      <button key={d} onClick={() => togglePresence(person, i)} style={{ flex: 1, padding: "8px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${on ? p.color : C.line}`, background: on ? p.color : C.surface, color: on ? "#fff" : C.sub, fontWeight: on ? 500 : 400 }}>{d}</button>
+                      <div key={e.id} onClick={() => goTab("agenda")} style={{ ...card, padding: "11px 13px", display: "flex", alignItems: "center", gap: 11, cursor: "pointer" }}>
+                        <div style={{ width: 40, textAlign: "center", fontSize: 12, fontWeight: 500, color: C.sub }}>{DAYS[e.d]}</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5 }}>{e.title}</div>
+                          <div style={{ fontSize: 11.5, color: C.faint }}>{e.time ? `${e.time}, ` : ""}<span style={{ color: pp.color }}>{pp.name || ""}</span></div>
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
               </div>
             );
-          })}
-
-          {/* Both-home strip */}
-          <div style={{ ...card, padding: "14px 16px", marginBottom: 16, background: "#FAF0E4", borderColor: "#F0E2C4" }}>
-            <div style={{ fontSize: 12.5, fontWeight: 500, color: "#B06A2C", marginBottom: 10 }}>Dias com os dois em casa</div>
-            <div style={{ display: "flex", gap: 6 }}>
-              {DAYS.map((d, i) => {
-                const home = !(week.presence.rafa || []).includes(i) && !(week.presence.lucas || []).includes(i);
-                return <div key={d} style={{ flex: 1, textAlign: "center", padding: "7px 0", borderRadius: 8, fontSize: 12, background: home ? "#B06A2C" : "transparent", color: home ? "#fff" : "#D3BC9C", fontWeight: home ? 500 : 400 }}>{d}</div>;
-              })}
-            </div>
-            <div style={{ fontSize: 11.5, color: "#8A5A22", marginTop: 9, lineHeight: 1.5 }}>Os melhores dias para cozinhar juntos, tarefas em dupla ou só descansar.</div>
-          </div>
-
-          {/* Suggestions */}
-          {suggestions.length > 0 && (
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}><Lightbulb size={15} color="#B06A2C" /> Ajustes sugeridos</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {suggestions.map((s, idx) => {
-                  const rafaOut = week.presence.rafa || [];
-                  const lucasOut = week.presence.lucas || [];
-                  const bothHome = (d) => !rafaOut.includes(d) && !lucasOut.includes(d);
-                  return (
-                    <div key={idx} style={{ ...card, padding: "12px 14px" }}>
-                      <div style={{ fontSize: 13, lineHeight: 1.5, marginBottom: 10 }}>
-                        <b style={{ fontWeight: 500 }}>{s.task.title}</b> está marcada para <b style={{ fontWeight: 500 }}>{DAY_FULL[s.from]}</b>, mas{" "}
-                        <b style={{ fontWeight: 500 }}>{(s.whoOut || []).map((k) => PEOPLE[k]?.name).filter(Boolean).join(" e ") || "alguém"}</b>{" "}
-                        {(s.whoOut || []).length > 1 ? "estarão" : "estará"} no escritório.
-                        {s.to !== null ? <> A sugestão é <b style={{ fontWeight: 500, color: "#B06A2C" }}>{DAY_FULL[s.to]}</b>, mas você escolhe:</> : <> Escolha para qual dia mover:</>}
-                      </div>
-                      <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 7 }}>Mover para qual dia?</div>
-                      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 10 }}>
-                        {DAYS.map((d, i) => {
-                          const isFrom = i === s.from;
-                          const rec = bothHome(i) && !isFrom;
-                          return (
-                            <button key={d} disabled={isFrom} onClick={() => applyMove(s.task.id, s.from, i)}
-                              title={isFrom ? "dia atual" : rec ? "os dois em casa" : "alguém no escritório"}
-                              style={{ flex: "1 0 auto", minWidth: 40, padding: "8px 0", borderRadius: 9, fontSize: 12,
-                                cursor: isFrom ? "default" : "pointer", opacity: isFrom ? 0.55 : 1,
-                                border: `1px solid ${rec ? "#B06A2C" : C.line}`,
-                                background: isFrom ? "#EBEFF6" : rec ? "#FAF0E4" : C.surface,
-                                color: isFrom ? C.faint : rec ? "#B06A2C" : C.sub,
-                                fontWeight: rec ? 500 : 400 }}>{d}</button>
-                          );
-                        })}
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: C.faint }}>
-                          <span style={{ width: 9, height: 9, borderRadius: 3, background: "#FAF0E4", border: "1px solid #B06A2C" }} /> os dois em casa
-                        </span>
-                        <button className="rot-btn" onClick={() => applyMove(s.task.id, s.from, null)} style={{ marginLeft: "auto", padding: "7px 12px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, cursor: "pointer", fontSize: 12.5, color: C.sub }}>
-                          Não precisou esta semana
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {suggestions.length === 0 && (week.presence.rafa?.length || week.presence.lucas?.length) ? (
-            <div style={{ textAlign: "center", padding: "20px 0", color: C.faint, fontSize: 13 }}>Tudo encaixado — nenhuma tarefa em dupla conflita com os dias presenciais.</div>
-          ) : null}
-        </div>
-      )}
-
-      {/* ---------- SAÚDE & VIDA ---------- */}
-      {tab === "saude" && (
-        <div style={{ animation: "fade .25s ease" }}>
-          <div style={{ ...card, padding: "13px 15px", marginBottom: 16, background: "#FBEAF1", borderColor: "#F2D2DF", display: "flex", gap: 10 }}>
-            <HeartPulse size={17} color="#C04574" style={{ flexShrink: 0, marginTop: 1 }} />
-            <div style={{ fontSize: 12.5, color: "#8A2E4E", lineHeight: 1.5 }}>
-              Este é um espaço para <b style={{ fontWeight: 500 }}>organizar</b> a rotina de saúde — refeições, consultas, vitórias. Metas de dieta, calorias ou exercício devem ser definidas com seu médico ou nutricionista, e aí você registra aqui o que foi orientado.
-            </div>
-          </div>
-
-          {/* Meal plan */}
-          <SectionTitle icon={Utensils} color="#B06A2C">Plano de refeições da semana</SectionTitle>
-          <div style={{ ...card, padding: "6px 4px", marginBottom: 18 }}>
-            {DAYS.map((d, i) => (
-              <div key={d} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderTop: i === 0 ? "none" : `1px solid ${C.line}` }}>
-                <div style={{ width: 38, fontSize: 12.5, color: i === ti && offset === 0 ? C.accent : C.sub, fontWeight: i === ti && offset === 0 ? 500 : 400 }}>{d}</div>
-                <input value={week.meals[i] || ""} placeholder="o que vamos comer?"
-                  onChange={(e) => patchWeek({ meals: { ...week.meals, [i]: e.target.value } })}
-                  style={{ flex: 1, border: "none", background: "transparent", fontSize: 13.5, color: C.ink, outline: "none", padding: "4px 0" }} />
-              </div>
-            ))}
-          </div>
-
-          {/* Appointments */}
-          <SectionTitle icon={Stethoscope} color="#C04574">Consultas e profissionais</SectionTitle>
-          <p style={{ fontSize: 12, color: C.faint, lineHeight: 1.5, margin: "-4px 0 10px" }}>
-            Cadastre uma consulta (nutricionista, cardiologista…) e, se escolher um dia, ela vira um <b style={{ fontWeight: 500 }}>evento da pessoa</b> na visão Hoje e Semana.
-          </p>
-          <div style={{ marginBottom: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-            {(week.appts || []).map((a, idx) => (
-              <div key={idx} style={{ ...card, padding: "11px 13px", display: "flex", alignItems: "center", gap: 10 }}>
-                <Stethoscope size={15} color="#C04574" style={{ flexShrink: 0 }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5 }}>{a.title}</div>
-                  <div style={{ fontSize: 11.5, color: C.faint }}>{[a.day != null ? DAY_FULL[a.day] : null, a.when || null, a.who ? (PEOPLE[a.who]?.name || a.who) : null].filter(Boolean).join(" · ")}</div>
-                </div>
-                <button className="rot-btn" onClick={() => patchWeek({ appts: week.appts.filter((_, j) => j !== idx) })} style={{ ...iconBtn, width: 30, height: 30 }}><Trash2 size={14} color={C.faint} /></button>
-              </div>
-            ))}
-          </div>
-          <ApptAdder onAdd={(a) => patchWeek({ appts: [...(week.appts || []), a] })} C={C} PEOPLE={PEOPLE} />
-
-          {/* Wins */}
-          <div style={{ marginTop: 20 }}>
-            <SectionTitle icon={TrendingUp} color="#0E7C61">Vitórias da semana</SectionTitle>
-            <textarea value={week.wins || ""} placeholder="o que deu certo? como vocês se sentiram?"
-              onChange={(e) => patchWeek({ wins: e.target.value })}
-              style={{ width: "100%", minHeight: 70, ...card, padding: "12px 14px", fontSize: 13.5, color: C.ink, outline: "none", resize: "vertical", boxSizing: "border-box", lineHeight: 1.5 }} />
-          </div>
+          })()}
         </div>
       )}
 
@@ -1292,52 +1120,6 @@ function SectionTitle({ icon: Ic, color, children }) {
   return <div className="lar-display" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 15.5, fontWeight: 600, color }}><Ic size={16} /> {children}</div>;
 }
 
-function ApptAdder({ onAdd, C, PEOPLE }) {
-  const [open, setOpen] = useState(false);
-  const [title, setTitle] = useState("");
-  const [when, setWhen] = useState("");
-  const [who, setWho] = useState("rafa");
-  const [day, setDay] = useState(null);
-  if (!open) return (
-    <button className="rot-btn" onClick={() => setOpen(true)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 13px", borderRadius: 10, border: `1px solid ${C.line}`, background: C.surface, cursor: "pointer", fontSize: 13, color: C.sub, marginBottom: 4 }}>
-      <Plus size={15} /> Adicionar consulta
-    </button>
-  );
-  const reset = () => { setTitle(""); setWhen(""); setDay(null); setOpen(false); };
-  return (
-    <div style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 14, padding: 14, marginBottom: 4 }}>
-      <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="ex: nutricionista, cardiologista"
-        style={{ width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 9, border: `1px solid ${C.line}`, fontSize: 13.5, outline: "none", marginBottom: 8 }} />
-      <input value={when} onChange={(e) => setWhen(e.target.value)} placeholder="horário? ex: 15h (opcional)"
-        style={{ width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 9, border: `1px solid ${C.line}`, fontSize: 13.5, outline: "none", marginBottom: 12 }} />
-
-      <Label C={C}>De quem é?</Label>
-      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-        {Object.entries(PEOPLE).map(([k, p]) => (
-          <button key={k} onClick={() => setWho(k)} style={{ flex: 1, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${who === k ? p.color : C.line}`, background: who === k ? p.soft : C.surface, color: who === k ? p.color : C.sub, fontWeight: who === k ? 500 : 400 }}>{p.name}</button>
-        ))}
-      </div>
-
-      <Label C={C}>Em que dia? (vira evento na semana)</Label>
-      <div style={{ display: "flex", gap: 5, marginBottom: 6, flexWrap: "wrap" }}>
-        {DAYS.map((d, i) => (
-          <button key={d} onClick={() => setDay(i)} style={{ flex: "1 0 auto", minWidth: 38, padding: "7px 0", borderRadius: 9, fontSize: 12, cursor: "pointer", border: `1px solid ${day === i ? C.accent : C.line}`, background: day === i ? "#E3EAFB" : C.surface, color: day === i ? C.accent : C.sub, fontWeight: day === i ? 500 : 400 }}>{d}</button>
-        ))}
-      </div>
-      <button onClick={() => setDay(null)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11.5, color: day === null ? C.accent : C.faint, padding: "2px 0", marginBottom: 12 }}>
-        {day === null ? "✓ " : ""}sem dia fixo
-      </button>
-
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={() => { if (title.trim()) { onAdd({ title: title.trim(), when, who, day }); reset(); } }}
-          style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", background: "#18233F", color: "#fff", fontSize: 13, fontWeight: 500, cursor: "pointer" }}>Salvar</button>
-        <button onClick={reset} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.surface, color: C.sub, fontSize: 13, cursor: "pointer" }}>Cancelar</button>
-      </div>
-    </div>
-  );
-}
-
-// Navegação da aba Hoje: setas de dia a dia e uma faixa de ontem até os próximos dias.
 function DayStrip({ today, dayOffset, setDayOffset, pendingOn, C }) {
   const strip = [-1, 0, 1, 2, 3, 4, 5];
   return (
@@ -1548,7 +1330,6 @@ function HistoryView({ weeks, templates, C, PEOPLE }) {
           </div>
           <div style={{ display: "flex", gap: 14, fontSize: 11.5, color: C.faint }}>
             <span>{r.dn}/{r.tot} tarefas</span>
-            <span>· {r.presDays} dias presenciais</span>
           </div>
           {(r.cheer.rafa + r.cheer.lucas + r.cheer.both) > 0 && (
             <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
@@ -1687,12 +1468,6 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
             {untilOk && draft.until && <span style={{ color: C.faint }}>Último dia: {fmtDay(draft.until)}. Depois disso sai da rotina, mas o histórico fica.</span>}
           </div>
 
-          <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 12.5, color: C.sub }}>
-            <button onClick={() => setDraft({ ...draft, flexible: !draft.flexible })} style={{ width: 20, height: 20, borderRadius: 6, border: `2px solid ${draft.flexible ? C.accent : "#C9D1DF"}`, background: draft.flexible ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0 }}>
-              {draft.flexible && <Check size={12} color="#fff" />}
-            </button>
-            Flexível — pode mudar de dia conforme os dias presenciais
-          </label>
 
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={save} style={{ flex: 1, padding: "11px 0", borderRadius: 9, border: "none", background: "#18233F", color: "#fff", fontSize: 13.5, fontWeight: 500, cursor: "pointer", opacity: draft.title.trim() && draft.days.length ? 1 : 0.4 }}>{editingId ? "Salvar alterações" : "Adicionar à rotina"}</button>
@@ -1716,7 +1491,7 @@ function ManageTemplates({ templates, setTemplates, C, ti, PEOPLE, peopleRaw, se
                   return (
                     <div key={t.id} className="rot-row" onClick={() => openEdit(t)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: C.surface, border: `1px solid ${isEd ? C.accent : C.line}`, borderRadius: 11, cursor: "pointer" }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13.5, display: "flex", alignItems: "center", gap: 6 }}>{cv.title}{cv.flexible && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 5, background: softOf(PEOPLE.both.color), color: PEOPLE.both.color }}>flexível</span>}</div>
+                        <div style={{ fontSize: 13.5, display: "flex", alignItems: "center", gap: 6 }}>{cv.title}</div>
                         <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 4, flexWrap: "wrap" }}>
                           <Tag soft={p.soft} color={p.color}>{p.name}</Tag>
                           <span style={{ fontSize: 11.5, color: C.faint }}>{cv.days.length === 7 ? "Todos os dias" : [...cv.days].sort((a, b) => a - b).map((d) => DAYS[d]).join(", ")}</span>
