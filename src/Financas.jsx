@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Wallet, CreditCard, PiggyBank, Plus, X, ChevronLeft, ChevronRight, ChevronDown, ChevronUp,
-  Check, Trash2, Pencil, Users, LogOut, Layers, TrendingUp, Copy, Send, FileUp, AlertTriangle, MoreHorizontal
+  Check, Trash2, Pencil, Users, LogOut, Layers, TrendingUp, Copy, Send, FileUp, AlertTriangle, MoreHorizontal, Minus
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { pagesFromPdf } from "./faturas/pdfText";
@@ -52,11 +52,28 @@ function normalize(d) {
     if (!n.cat && fixed.has(n.sub)) { const c = suggestCategory(n.desc, null, before); if (c) n = { ...n, cat: c }; }
     return n;
   });
+  // divisões antigas, guardadas por mês, passam a morar no próprio lançamento
+  const legacy = {};
+  Object.entries(x.months || {}).forEach(([ym, m]) => (m.receivables || []).forEach((r) => { if (r.txId) (legacy[r.txId] = legacy[r.txId] || []).push({ ...r, ym }); }));
+  if (Object.keys(legacy).length) {
+    x.txs = x.txs.map((t) => {
+      const l = legacy[t.id]; if (!l || t.split) return t;
+      const per = {}; l.forEach((r) => { per[r.who] = (per[r.who] || 0) + r.amount; });
+      const others = Object.entries(per).map(([who, parts]) => ({ who, parts }));
+      return { ...t, split: [{ who: "", parts: Math.max(0, t.amount - others.reduce((n, o) => n + o.parts, 0)) }, ...others] };
+    });
+    const ids = new Set(x.txs.map((t) => t.id));
+    x.months = Object.fromEntries(Object.entries(x.months).map(([ym, m]) => {
+      const rec = { ...(m.received || {}) };
+      (m.receivables || []).forEach((r) => { if (r.txId && ids.has(r.txId) && rec[`rcv:${r.id}`]) rec[`tx:${r.txId}:${r.who}`] = true; });
+      return [ym, { ...m, received: rec, receivables: (m.receivables || []).filter((r) => !(r.txId && ids.has(r.txId))) }];
+    }));
+  }
   // cadastro de pessoas (terceiros): o que já está em uso entra sozinho
   const known = new Set((x.people || []).map((p) => p.name));
   const used = [
     ...x.cards.flatMap((c) => [c.usedBy, ...c.subs.map((sb) => sb.who)]),
-    ...x.txs.map((t) => t.owner),
+    ...x.txs.flatMap((t) => [t.owner, ...(t.split || []).map((p) => p.who)]),
     ...Object.values(x.months || {}).flatMap((m) => (m.receivables || []).map((r) => r.who)),
   ].filter(Boolean);
   x.people = [...(x.people || [])];
@@ -114,6 +131,20 @@ function instOcc(it, ym) {
   if (i < 0 || i >= it.total) return null;
   return i + 1;
 }
+// Nome mostrado para o que é do casal (vem do app: "Rafaela e Lucas")
+let CASAL = "Rafa e Lucas";
+// Divisão por partes: [{ who: "" (casal) | "Nome", parts }]. Vale para cada parcela da compra.
+function splitShares(split, amount) {
+  const list = (split || []).filter((x) => x.parts > 0);
+  const tot = list.reduce((n, x) => n + x.parts, 0);
+  if (!tot) return [];
+  const cents = Math.round(amount * 100);
+  const out = list.map((x) => ({ who: x.who || "", amount: Math.round((cents * x.parts) / tot) / 100 }));
+  const diff = Math.round((cents - Math.round(out.reduce((n, x) => n + x.amount, 0) * 100))) / 100;
+  if (diff) { const i = Math.max(0, out.findIndex((x) => !x.who)); out[i].amount = Math.round((out[i].amount + diff) * 100) / 100; }
+  return out;
+}
+const thirdOf = (split, amount) => splitShares(split, amount).filter((x) => x.who);
 const subOf = (card, subId) => (card?.subs || []).find((s) => s.id === subId) || null;
 // De quem é o lançamento: escolha feita no próprio lançamento, senão a do cartão adicional. "" = do casal.
 const ownerOf = (card, t) => (t.owner != null ? t.owner : subOf(card, t.sub)?.who || "");
@@ -133,8 +164,17 @@ function cobrancasOf(data, ym) {
       if (t.cardId !== c.id) return;
       const o = txOcc(t, ym); if (!o) return;
       const s = subOf(c, t.sub); const who = ownerOf(c, t);
-      if (who) items.push({ key: `tx:${t.id}`, who, desc: t.desc, date: t.date, amount: t.amount, origin: `${c.name}${s?.label ? ` (${s.label})` : ""}`, parcel: (t.parcels || 1) > 1 ? `${o.curParcel}/${t.parcels}` : null });
+      const parcelLabel = (t.parcels || 1) > 1 ? `${o.curParcel}/${t.parcels}` : null;
+      if (!who) {
+        thirdOf(t.split, t.amount).forEach((x) => items.push({ key: `tx:${t.id}:${x.who}`, who: x.who, desc: t.desc, date: t.date, amount: x.amount, origin: `parte de ${brl(t.amount)}, ${c.name}`, parcel: parcelLabel, txId: t.id }));
+        return;
+      }
+      items.push({ key: `tx:${t.id}`, who, desc: t.desc, date: t.date, amount: t.amount, origin: `${c.name}${s?.label ? ` (${s.label})` : ""}`, parcel: parcelLabel });
     });
+  });
+  data.installments.forEach((it) => {
+    const k = instOcc(it, ym); if (!k) return;
+    thirdOf(it.split, it.amount).forEach((x) => items.push({ key: `inst:${it.id}:${x.who}`, who: x.who, desc: it.name, amount: x.amount, origin: `parte da parcela de ${brl(it.amount)}`, parcel: `${k}/${it.total}` }));
   });
   (mo.receivables || []).forEach((r) => {
     const t = r.txId ? data.txs.find((x) => x.id === r.txId) : null;
@@ -184,13 +224,16 @@ function spendByCat(data, ym) {
     out[k] = (out[k] || 0) + amount;
     (lines[k] = lines[k] || []).push({ label, amount });
   };
-  m.despesas.forEach((d) => add(d.cat, d.amount, d.name));
+  m.despesas.forEach((d) => {
+    const third = d.src === "inst" ? sum(thirdOf(d.inst.split, d.amount)) : 0;
+    if (d.amount - third) add(d.cat, d.amount - third, d.name);
+  });
   m.cards.forEach(({ card, total, occs }) => {
     if (card.mode === "so_fatura") { if (!card.usedBy && total) add(card.cat, total, `Fatura ${card.name}`); return; }
     occs.forEach((t) => {
       if (ownerOf(card, t)) return;
-      const split = sum((mo.receivables || []).filter((r) => r.txId === t.id));
-      const own = t.amount - split;
+      const split = sum(thirdOf(t.split, t.amount)) + sum((mo.receivables || []).filter((r) => r.txId === t.id));
+      const own = Math.round((t.amount - split) * 100) / 100;
       if (own) add(t.cat, own, t.desc);
     });
   });
@@ -274,7 +317,7 @@ function CatSelect({ cats, value, onChange, allowEmpty = true, style }) {
   );
 }
 // Escolha de pessoa: "" é do casal. Dá para cadastrar alguém novo direto daqui.
-function PeopleSelect({ value, onChange, people, onAdd, ours = "Nosso", style }) {
+function PeopleSelect({ value, onChange, people, onAdd, ours = CASAL, style }) {
   const list = Array.from(new Set([...(people || []), ...(value ? [value] : [])]));
   return (
     <select value={value || ""} style={{ ...input, padding: "8px 9px", ...style }}
@@ -310,7 +353,8 @@ function MonthNav({ ym, setYm }) {
 
 // ================= componente principal =================
 // O login agora é do app inteiro (Login.jsx). Aqui só chega quem já entrou.
-export default function Financas({ code, view, onGo, email }) {
+export default function Financas({ code, view, onGo, email, casal }) {
+  if (casal) CASAL = casal;
   return <FinancasApp code={code} view={view} onGo={onGo} email={email} />;
 }
 
@@ -418,7 +462,7 @@ function MesView({ data, update, ym, patchMonth, cats, catOf, say, onGo }) {
             <button onClick={() => togglePaid(`card:${c.id}`)} aria-label="Fatura paga" style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, cursor: "pointer", display: "grid", placeItems: "center", border: `2px solid ${paid ? C.good : "#C9D1DF"}`, background: paid ? C.good : "transparent" }}>{paid && <Check size={12} color="#fff" />}</button>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13.5 }}>{c.name}</div>
-              <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>{c.mode === "so_fatura" ? (c.usedBy ? `só o valor da fatura, cobrado de ${c.usedBy}` : "só o valor da fatura") : `${occs.length} lançamentos`}</div>
+              <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>{c.mode === "so_fatura" ? (c.usedBy ? `só o valor da fatura, cobrado de ${c.usedBy}` : "só o valor da fatura") : `${occs.length} lançamentos${(() => { const x = sum(occs, (t) => (ownerOf(c, t) ? t.amount : sum(thirdOf(t.split, t.amount)))); return x ? `, ${brl(x)} de outras pessoas` : ""; })()}`}</div>
             </div>
             {c.mode === "so_fatura" ? (
               <MoneyInput value={filled ? total : null} placeholder="valor" onSave={(v) => patchMonth(ym, (mo) => { const inv = { ...mo.invoices }; if (v == null) delete inv[c.id]; else inv[c.id] = v; return { ...mo, invoices: inv }; })} />
@@ -586,18 +630,18 @@ function PainelView({ data, ym, catOf, onGo }) {
   }), [data, ym]);
   const fmax = Math.max(1, ...futuro.map((f) => f.v));
   const sem = byCat._sem || 0;
-  const receber = useMemo(() => sum(Object.values(abertos(data, ymAdd(ymNow(), 1))), (o) => o.amount), [data]);
+  const receber = sum(m.cob.filter((c) => !c.received));
 
   return (
     <div>
       <div style={{ ...card, padding: "16px 16px 14px" }}>
-        <div style={{ fontSize: 12.5, color: C.sub }}>Gasto do casal em {ymLabel(ym)}</div>
+        <div style={{ fontSize: 12.5, color: C.sub }}>Gasto de {CASAL} em {ymLabel(ym)}</div>
         <div className="lar-display" style={{ fontSize: 30, fontWeight: 600, letterSpacing: -0.5, marginTop: 2 }}>{brl(totalCat)}</div>
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 8, fontSize: 12.5, color: C.sub }}>
           <span>Entradas <b style={{ color: C.good, fontWeight: 600 }}>{brl(m.totals.entradas)}</b></span>
           <span>Sobra <b style={{ color: m.totals.sobra < 0 ? C.bad : C.good, fontWeight: 600 }}>{brl(m.totals.sobra)}</b></span>
           {data.savings.balance != null && <span>Na XP <b style={{ color: C.accent, fontWeight: 600 }}>{brl(data.savings.balance)}</b></span>}
-          {receber > 0 && <button onClick={() => onGo && onGo("fin-cobrancas")} style={{ ...iconbtn, display: "inline", padding: 0, fontSize: 12.5, color: C.sub, fontFamily: "inherit" }}>A receber <b style={{ color: C.sun, fontWeight: 600 }}>{brl(receber)}</b></button>}
+          {receber > 0 && <button onClick={() => onGo && onGo("fin-cobrancas")} style={{ ...iconbtn, display: "inline", padding: 0, fontSize: 12.5, color: C.sub, fontFamily: "inherit" }}>A receber no mês <b style={{ color: C.sun, fontWeight: 600 }}>{brl(receber)}</b></button>}
         </div>
         <div style={{ fontSize: 11.5, color: C.faint, marginTop: 8, lineHeight: 1.45 }}>Não entra aqui o que é de outras pessoas nem a parte dividida das compras. Isso fica em A receber.</div>
       </div>
@@ -678,15 +722,16 @@ function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, pe
   const mo = data.months[ym] || {};
   const occs = data.txs.filter((t) => t.cardId === cardId).map((t) => txOcc(t, ym)).filter(Boolean)
     .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-  const owners = Array.from(new Set(occs.map((t) => ownerOf(c, t)).filter(Boolean)));
+  const involved = (t) => { const o = ownerOf(c, t); return o ? [o] : thirdOf(t.split, t.amount).map((x) => x.who); };
+  const owners = Array.from(new Set(occs.flatMap(involved)));
   const semCount = occs.filter((t) => !t.cat && !ownerOf(c, t)).length;
   const shown = occs.filter((t) => {
     if (filter === "sem") return !t.cat && !ownerOf(c, t);
     if (filter === "nosso") return !ownerOf(c, t);
-    if (filter.startsWith("p:")) return ownerOf(c, t) === filter.slice(2);
+    if (filter.startsWith("p:")) return involved(t).includes(filter.slice(2));
     return true;
   });
-  const splitOf = (t) => (mo.receivables || []).filter((r) => r.txId === t.id);
+  const thirdAmount = (t) => (ownerOf(c, t) ? t.amount : sum(thirdOf(t.split, t.amount)) + sum((mo.receivables || []).filter((r) => r.txId === t.id)));
   const setTx = (id, patch) => update((d) => ({ ...d, txs: d.txs.map((t) => (t.id === id ? { ...t, ...patch } : t)) }));
   const delTx = (t) => {
     const msg = (t.parcels || 1) > 1 && !t.anticipated ? `Apagar "${t.desc}" e todas as parcelas dessa compra?` : `Apagar "${t.desc}"?`;
@@ -710,7 +755,7 @@ function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, pe
     say(`Fatura de ${ymLabel(ym)} apagada`);
   };
 
-  const chips = [["todos", "Todos"], ...(semCount ? [["sem", `Sem categoria (${semCount})`]] : []), ...(owners.length ? [["nosso", "Nossos"], ...owners.map((o) => [`p:${o}`, `De ${o}`])] : [])];
+  const chips = [["todos", "Todos"], ...(semCount ? [["sem", `Sem categoria (${semCount})`]] : []), ...(owners.length ? [["nosso", `Só de ${CASAL}`], ...owners.map((o) => [`p:${o}`, o])] : [])];
 
   return (
     <div>
@@ -729,7 +774,7 @@ function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, pe
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 12.5, color: C.sub }}>Fatura de {ymLabel(ym)}, {c.name}</div>
             <div className="lar-display" style={{ fontSize: 24, fontWeight: 600 }}>{brl(sum(occs))}</div>
-            <div style={{ fontSize: 11.5, color: C.faint }}>{occs.length} lançamentos{owners.length ? `, ${brl(sum(occs.filter((t) => ownerOf(c, t))))} de outras pessoas` : ""}</div>
+            <div style={{ fontSize: 11.5, color: C.faint }}>{occs.length} lançamentos{owners.length ? `, ${brl(sum(occs, thirdAmount))} de outras pessoas` : ""}</div>
           </div>
           <button onClick={() => setMenu(!menu)} aria-label="Mais opções" style={{ ...iconbtn, padding: 6 }}><MoreHorizontal size={18} /></button>
         </div>
@@ -752,7 +797,8 @@ function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, pe
       {shown.length === 0 ? <div style={{ ...card, padding: 16, fontSize: 12.5, color: C.faint, borderStyle: "dashed" }}>Nada por aqui nesta fatura.</div> : (
         <div style={{ ...card, padding: "0 14px" }}>
           {shown.map((t, i) => {
-            const s = subOf(c, t.sub); const who = ownerOf(c, t); const splits = splitOf(t); const isOpen = open === t.id;
+            const s = subOf(c, t.sub); const who = ownerOf(c, t); const third = who ? 0 : thirdAmount(t); const isOpen = open === t.id;
+            const splitNames = thirdOf(t.split, t.amount).map((x) => x.who);
             if (form === t.id) return <div key={t.id} style={{ padding: "10px 0" }}><TxForm card={c} cats={cats} ym={ym} people={people} addPerson={addPerson} initial={t} onCancel={() => setForm(null)} onSave={(p) => { setTx(t.id, p); setForm(null); }} /></div>;
             const cat = catOf(t.cat);
             return (
@@ -766,7 +812,7 @@ function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, pe
                         : t.cat ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Dot color={cat.color} s={6} />{cat.name}</span>
                         : <span style={{ color: C.sun }}>sem categoria</span>}
                       {(t.parcels || 1) > 1 && <span>parcela {t.curParcel}/{t.parcels}</span>}
-                      {splits.length > 0 && <span style={{ color: C.good }}>{brl(sum(splits))} a receber</span>}
+                      {third > 0 && <span style={{ color: C.good }}>dividido, {brl(third)} a receber{splitNames.length ? ` de ${splitNames.join(", ")}` : ""}</span>}
                       {s?.label && (c.subs || []).length > 1 && <span>{s.label}</span>}
                     </div>
                   </div>
@@ -786,13 +832,12 @@ function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, pe
                     </div>
                     {(t.parcels || 1) > 1 && t.replicated && <div style={{ fontSize: 11.5, color: C.faint }}>Parcela de uma compra que entrou na fatura de {ymLabel(t.month)}.</div>}
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                      {!who && <button onClick={() => setSplitFor(splitFor === t.id ? null : t.id)} style={{ ...btn, padding: "5px 10px", fontSize: 12 }}><Users size={13} /> dividir</button>}
+                      {!who && <button onClick={() => setSplitFor(splitFor === t.id ? null : t.id)} style={{ ...btn, padding: "5px 10px", fontSize: 12 }}><Users size={13} /> {t.split ? "ver divisão" : "dividir"}</button>}
                       <button onClick={() => setForm(t.id)} style={{ ...btn, padding: "5px 10px", fontSize: 12 }}><Pencil size={12} /> editar</button>
                       <button onClick={() => delTx(t)} style={{ ...btn, padding: "5px 10px", fontSize: 12, color: C.bad }}><Trash2 size={12} /> apagar</button>
                     </div>
-                    {splitFor === t.id && <SplitForm tx={t} people={people} addPerson={addPerson} splits={splits} onClose={() => setSplitFor(null)}
-                      onAdd={(r) => { patchMonth(ym, (m2) => ({ ...m2, receivables: [...m2.receivables, { id: uid(), txId: t.id, ...r }] })); say(`${r.who} vai te pagar ${brl(r.amount)}`); }}
-                      onDel={(id) => patchMonth(ym, (m2) => ({ ...m2, receivables: m2.receivables.filter((x) => x.id !== id) }))} />}
+                    {splitFor === t.id && <SplitForm amount={t.amount} parcelado={(t.parcels || 1) > 1 && !t.anticipated} split={t.split} people={people} addPerson={addPerson} onClose={() => setSplitFor(null)}
+                      onSave={(sp) => { setTx(t.id, { split: sp || undefined }); setSplitFor(null); say(sp ? "Divisão salva" : "Divisão removida"); }} />}
                   </div>
                 )}
               </div>
@@ -853,21 +898,42 @@ function TxForm({ card: c, cats, initial, onSave, onCancel, people, addPerson })
   );
 }
 
-function SplitForm({ tx, people, addPerson, splits, onAdd, onDel, onClose }) {
-  const [who, setWho] = useState("");
-  const [val, setVal] = useState("");
-  const add = () => { const a = parseMoney(val); if (!who.trim() || a == null) return; onAdd({ who: who.trim(), amount: a, desc: tx.desc }); setWho(""); setVal(""); };
+// Dividir em partes iguais entre o casal e outras pessoas. Ex.: pizza em casa com 3 amigos:
+// casal 2 partes, cada amigo 1 parte. Vale para todas as parcelas da compra.
+function SplitForm({ amount, parcelado, split, people, addPerson, onSave, onClose }) {
+  const [rows, setRows] = useState(() => (split && split.length ? split.map((x) => ({ ...x })) : [{ who: "", parts: 2 }]));
+  const has = (n) => rows.some((r) => r.who === n);
+  const toggle = (n) => setRows((l) => (has(n) ? l.filter((r) => r.who !== n) : [...l, { who: n, parts: 1 }]));
+  const step = (who, d) => setRows((l) => l.map((r) => (r.who === who ? { ...r, parts: Math.max(0, r.parts + d) } : r)));
+  const newPerson = () => { const n = (window.prompt("Nome da pessoa") || "").trim(); if (n && cleanWho(n)) { addPerson(n); if (!has(n)) setRows((l) => [...l, { who: n, parts: 1 }]); } };
+  const ordered = [...rows.filter((r) => !r.who), ...rows.filter((r) => r.who)];
+  const shares = splitShares(rows, amount);
+  const shareOf = (who) => shares.find((x) => x.who === who)?.amount || 0;
+  const valid = rows.some((r) => r.who && r.parts > 0);
+  const totalParts = rows.reduce((n, r) => n + r.parts, 0);
   return (
-    <div style={{ marginTop: 10, padding: 12, background: "#F5F7FB", borderRadius: 10, display: "flex", flexDirection: "column", gap: 9 }}>
-      <div style={{ fontSize: 12.5, color: C.sub }}>Quanto cada pessoa te deve desta compra. Entra em A receber e sai do gasto da categoria.</div>
-      {splits.map((r) => <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}><span style={{ flex: 1 }}>{r.who}</span><span>{brl(r.amount)}</span><button onClick={() => onDel(r.id)} style={iconbtn}><X size={14} /></button></div>)}
-      <div style={{ display: "flex", gap: 8 }}>
-        <PeopleSelect value={who} people={people} onAdd={addPerson} ours={null} onChange={setWho} style={{ flex: 2 }} />
-        <input style={{ ...input, flex: 1 }} inputMode="decimal" placeholder="Valor" value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+    <div style={{ padding: 12, background: "#F5F7FB", borderRadius: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ fontSize: 13, fontWeight: 600 }}>Dividir {brl(amount)}{parcelado ? " por parcela" : ""} em partes iguais</div>
+      <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.45 }}>Escolha quem participou. Conte 2 partes para {CASAL} quando os dois participaram e 1 quando só um foi.{parcelado ? " A divisão vale para todas as parcelas." : ""}</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {people.map((n) => <button key={n} onClick={() => toggle(n)} style={{ ...btn, padding: "5px 11px", borderRadius: 99, fontSize: 12, background: has(n) ? C.sun : "#fff", color: has(n) ? "#fff" : C.sub, borderColor: has(n) ? C.sun : C.line }}>{has(n) ? <Check size={12} /> : null}{n}</button>)}
+        <button onClick={newPerson} style={{ ...btn, padding: "5px 11px", borderRadius: 99, fontSize: 12, background: "#fff" }}><Plus size={12} /> pessoa</button>
       </div>
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={onClose} style={{ ...btn, flex: 1, justifyContent: "center", background: "#fff" }}>fechar</button>
-        <button onClick={add} style={{ ...dark, flex: 2, justifyContent: "center" }}>adicionar</button>
+      <div style={{ background: "#fff", borderRadius: 9, padding: "2px 10px" }}>
+        {ordered.map((r, i) => (
+          <div key={r.who || "_casal"} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderTop: i ? `1px solid ${C.line}` : "none" }}>
+            <span style={{ flex: 1, fontSize: 13, color: r.who ? C.ink : C.accent, fontWeight: r.who ? 400 : 600 }}>{r.who || CASAL}</span>
+            <button onClick={() => step(r.who, -1)} aria-label="Menos uma parte" style={{ ...btn, padding: 4, borderRadius: 7 }}><Minus size={12} /></button>
+            <span style={{ fontSize: 12.5, minWidth: 54, textAlign: "center" }}>{r.parts} {r.parts === 1 ? "parte" : "partes"}</span>
+            <button onClick={() => step(r.who, 1)} aria-label="Mais uma parte" style={{ ...btn, padding: 4, borderRadius: 7 }}><Plus size={12} /></button>
+            <span style={{ fontSize: 13, minWidth: 74, textAlign: "right", fontWeight: 500 }}>{totalParts ? brl(shareOf(r.who)) : "-"}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {split && split.length > 0 && <button onClick={() => onSave(null)} style={{ ...btn, background: "#fff", color: C.bad }}>tirar divisão</button>}
+        <button onClick={onClose} style={{ ...btn, background: "#fff", marginLeft: "auto" }}>cancelar</button>
+        <button onClick={() => valid && onSave(rows.filter((r) => r.parts > 0 || !r.who))} style={{ ...dark, opacity: valid ? 1 : 0.5 }}>salvar divisão</button>
       </div>
     </div>
   );
@@ -1053,32 +1119,51 @@ function RevisarFatura({ name, parsed, data, people, addPerson, onImport, onCanc
 }
 
 // ================= Parcelas =================
-function ParcelasView({ data, ym, catOf }) {
+function ParcelasView({ data, update, ym, catOf, people, addPerson, say }) {
   const [showDone, setShowDone] = useState(false);
+  const [filter, setFilter] = useState("todos"); // todos | casal | p:Nome
+  const [splitFor, setSplitFor] = useState(null);
   const rows = [
-    ...data.installments.map((it) => ({ id: it.id, name: it.name, where: "fora do cartão", amount: it.amount, total: it.total, start: it.first, end: ymAdd(it.first, it.total - 1), cat: it.cat })),
+    ...data.installments.map((it) => ({ id: it.id, kind: "inst", name: it.name, where: "fora do cartão", who: "", split: it.split, amount: it.amount, total: it.total, start: it.first, end: ymAdd(it.first, it.total - 1), cat: it.cat })),
     ...data.txs.filter((t) => (t.parcels || 1) > 1 && !t.anticipated).map((t) => {
       const c = data.cards.find((x) => x.id === t.cardId);
-      return { id: t.id, name: t.desc, where: c?.name || "cartão", who: ownerOf(c, t), amount: t.amount, total: t.parcels, start: ymAdd(t.month, -((t.parcel || 1) - 1)), end: txEnd(t), cat: t.cat };
+      return { id: t.id, kind: "tx", name: t.desc, where: c?.name || "cartão", who: ownerOf(c, t), split: t.split, amount: t.amount, total: t.parcels, start: ymAdd(t.month, -((t.parcel || 1) - 1)), end: txEnd(t), cat: t.cat };
     }),
   ].map((r) => {
     const cur = ymDiff(r.start, ym) + 1;
-    const active = cur >= 1 && cur <= r.total, future = cur < 1;
-    const remaining = active ? r.total - cur + 1 : future ? r.total : 0; // inclui a parcela deste mês
-    return { ...r, cur, active, future, left: remaining * r.amount };
+    const active = cur >= 1 && cur <= r.total;
+    const third = r.who ? r.amount : sum(thirdOf(r.split, r.amount));
+    const mine = Math.round((r.amount - third) * 100) / 100; // parte do casal por parcela
+    const remaining = active ? r.total - cur + 1 : 0; // inclui a parcela deste mês
+    const others = r.who ? [r.who] : thirdOf(r.split, r.amount).map((x) => x.who);
+    return { ...r, cur, active, mine, third, others, left: remaining * mine };
   });
-  const active = rows.filter((r) => r.active).sort((a, b) => a.end.localeCompare(b.end));
-  const done = rows.filter((r) => !r.active && !r.future && r.end < ym);
-  const mensal = sum(rows.filter((r) => r.active && !r.who));
-  const saldo = sum(rows.filter((r) => !r.who && r.active), (r) => r.left);
+  const inFilter = (r) => filter === "todos" || (filter === "casal" ? r.mine > 0 : r.others.includes(filter.slice(2)));
+  const activeAll = rows.filter((r) => r.active);
+  const names = Array.from(new Set(activeAll.flatMap((r) => r.others)));
+  const active = activeAll.filter(inFilter).sort((a, b) => a.end.localeCompare(b.end));
+  const done = rows.filter((r) => r.end < ym && inFilter(r));
+  const mensal = sum(active, (r) => r.mine);
+  const saldo = sum(active, (r) => r.left);
+  const saveSplit = (r, sp) => {
+    update((d) => r.kind === "tx"
+      ? { ...d, txs: d.txs.map((t) => (t.id === r.id ? { ...t, split: sp || undefined } : t)) }
+      : { ...d, installments: d.installments.map((it) => (it.id === r.id ? { ...it, split: sp || undefined } : it)) });
+    setSplitFor(null); say(sp ? "Divisão salva para todas as parcelas" : "Divisão removida");
+  };
 
   return (
     <div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <div style={{ background: "#EBEFF6", borderRadius: 11, padding: "11px 13px" }}><div style={{ fontSize: 11.5, color: C.sub }}>Parcelas de {ymLabel(ym)}</div><div className="lar-display" style={{ fontSize: 19, fontWeight: 600 }}>{brl(mensal)}</div></div>
+        <div style={{ background: "#EBEFF6", borderRadius: 11, padding: "11px 13px" }}><div style={{ fontSize: 11.5, color: C.sub }}>Parcelas de {CASAL} em {ymLabel(ym)}</div><div className="lar-display" style={{ fontSize: 19, fontWeight: 600 }}>{brl(mensal)}</div></div>
         <div style={{ background: "#EBEFF6", borderRadius: 11, padding: "11px 13px" }}><div style={{ fontSize: 11.5, color: C.sub }}>Falta pagar, contando este mês</div><div className="lar-display" style={{ fontSize: 19, fontWeight: 600 }}>{brl(saldo)}</div></div>
       </div>
-      <div style={{ fontSize: 11.5, color: C.faint, margin: "8px 2px 0" }}>Os totais são só do casal. Parcelas de outras pessoas aparecem na lista, marcadas com o nome.</div>
+      <div style={{ fontSize: 11.5, color: C.faint, margin: "8px 2px 0" }}>Os totais contam só a parte de {CASAL}. A parte de outras pessoas vai para A receber.</div>
+      {names.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 }}>
+          {[["todos", "Todas"], ["casal", CASAL], ...names.map((n) => [`p:${n}`, n])].map(([k, l]) => <button key={k} onClick={() => setFilter(k)} style={{ ...btn, padding: "5px 10px", fontSize: 12, borderRadius: 99, background: filter === k ? C.ink : C.surface, color: filter === k ? "#fff" : C.sub, borderColor: filter === k ? C.ink : C.line }}>{l}</button>)}
+        </div>
+      )}
       <Title icon={Layers}>Em andamento</Title>
       {active.length === 0 && <div style={{ ...card, padding: 16, fontSize: 12.5, color: C.faint, borderStyle: "dashed" }}>Nenhuma parcela neste mês.</div>}
       {active.map((r) => (
@@ -1087,15 +1172,18 @@ function ParcelasView({ data, ym, catOf }) {
             <span style={{ fontSize: 13.5, fontWeight: 500, flex: 1 }}>{r.name}</span>
             <span style={{ fontSize: 13.5, fontWeight: 500 }}>{brl(r.amount)}/mês</span>
           </div>
-          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 5, alignItems: "center" }}>
-            <Pill>{r.where}</Pill>
-            {r.who && <Pill color={C.sun} soft={C.sunSoft}>de {r.who}</Pill>}
-            {r.cat && <span style={{ fontSize: 11.5, color: C.faint, display: "inline-flex", alignItems: "center", gap: 4 }}><Dot color={catOf(r.cat).color} s={6} />{catOf(r.cat).name}</span>}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4, alignItems: "center", fontSize: 11.5, color: C.faint }}>
+            <span>{r.where}</span>
+            {r.who ? <span style={{ color: C.sun }}>de {r.who}</span>
+              : r.third > 0 ? <span style={{ color: C.good }}>dividida: {CASAL} {brl(r.mine)}, {r.others.join(", ")} {brl(r.third)}</span>
+              : r.cat ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Dot color={catOf(r.cat).color} s={6} />{catOf(r.cat).name}</span> : null}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 9 }}>
-            <div style={{ flex: 1, height: 6, background: "#EBEFF6", borderRadius: 99, overflow: "hidden" }}><div style={{ width: `${(Math.max(0, r.cur) / r.total) * 100}%`, height: "100%", background: C.accent }} /></div>
+            <div style={{ flex: 1, height: 6, background: "#EBEFF6", borderRadius: 99, overflow: "hidden" }}><div style={{ width: `${(r.cur / r.total) * 100}%`, height: "100%", background: C.accent }} /></div>
             <span style={{ fontSize: 11.5, color: C.sub, whiteSpace: "nowrap" }}>{r.cur}/{r.total}, até {ymLabel(r.end)}</span>
+            {!r.who && <button onClick={() => setSplitFor(splitFor === r.id ? null : r.id)} style={{ ...btn, padding: "4px 9px", fontSize: 11.5 }}><Users size={12} /> {r.split ? "divisão" : "dividir"}</button>}
           </div>
+          {splitFor === r.id && <div style={{ marginTop: 10 }}><SplitForm amount={r.amount} parcelado split={r.split} people={people} addPerson={addPerson} onClose={() => setSplitFor(null)} onSave={(sp) => saveSplit(r, sp)} /></div>}
         </div>
       ))}
       {done.length > 0 && <>
@@ -1108,9 +1196,9 @@ function ParcelasView({ data, ym, catOf }) {
 
 // ================= A receber (de terceiros) =================
 // Tudo que alguém te deve: em aberto de todos os meses no topo, detalhe do mês embaixo.
-function abertos(data, ateYm) {
+function abertos(data, ateYm, desde = 0) {
   const out = {};
-  for (let i = 0; i <= 24; i++) {
+  for (let i = desde; i <= 24; i++) {
     const y = ymAdd(ateYm, -i);
     cobrancasOf(data, y).filter((x) => !x.received).forEach((x) => {
       const o = (out[x.who] = out[x.who] || { amount: 0, months: {} });
@@ -1122,14 +1210,18 @@ function abertos(data, ateYm) {
 
 function CobrancasView({ data, ym, setYm, patchMonth, say, people, addPerson }) {
   const items = useMemo(() => cobrancasOf(data, ym), [data, ym]);
-  const open = useMemo(() => abertos(data, ymAdd(ymNow(), 1) > ym ? ymAdd(ymNow(), 1) : ym), [data, ym]);
+  const older = useMemo(() => abertos(data, ym, 1), [data, ym]); // só meses anteriores ao escolhido
+  const [only, setOnly] = useState(null); // filtro por pessoa
   const [adding, setAdding] = useState(false);
   const [who, setWho] = useState(""); const [desc, setDesc] = useState(""); const [val, setVal] = useState("");
   const byWho = {};
   items.forEach((it) => { (byWho[it.who] = byWho[it.who] || []).push(it); });
-  const names = Object.keys(byWho).sort((a, b) => sum(byWho[b]) - sum(byWho[a]));
-  const openNames = Object.keys(open).sort((a, b) => open[b].amount - open[a].amount);
-  const totalOpen = sum(openNames, (n) => open[n].amount);
+  const allNames = Array.from(new Set([...Object.keys(byWho), ...Object.keys(older)]));
+  const pick = (n) => !only || n === only;
+  const names = Object.keys(byWho).filter(pick).sort((a, b) => sum(byWho[b]) - sum(byWho[a]));
+  const olderNames = Object.keys(older).filter(pick).sort((a, b) => older[b].amount - older[a].amount);
+  const monthItems = items.filter((i) => pick(i.who));
+  const monthTotal = sum(monthItems), monthGot = sum(monthItems.filter((i) => i.received));
 
   const toggle = (key) => patchMonth(ym, (mo) => ({ ...mo, received: { ...mo.received, [key]: !mo.received[key] } }));
   const allReceived = (name, val2) => patchMonth(ym, (mo) => { const r = { ...mo.received }; byWho[name].forEach((it) => { r[it.key] = val2; }); return { ...mo, received: r }; });
@@ -1151,25 +1243,18 @@ function CobrancasView({ data, ym, setYm, patchMonth, say, people, addPerson }) 
       <div style={{ ...card, padding: "14px 16px" }}>
         <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12.5, color: C.sub }}>Em aberto, somando todos os meses</div>
-            <div className="lar-display" style={{ fontSize: 26, fontWeight: 600, color: totalOpen ? C.ink : C.good }}>{brl(totalOpen)}</div>
+            <div style={{ fontSize: 12.5, color: C.sub }}>A receber em {ymLabel(ym)}{only ? ` de ${only}` : ""}</div>
+            <div className="lar-display" style={{ fontSize: 26, fontWeight: 600 }}>{brl(monthTotal)}</div>
+            <div style={{ fontSize: 12, color: monthTotal && monthGot >= monthTotal ? C.good : C.faint }}>{!monthTotal ? "nada neste mês" : monthGot >= monthTotal ? "tudo recebido" : `${brl(monthGot)} recebido, falta ${brl(monthTotal - monthGot)}`}</div>
           </div>
           <button onClick={() => setAdding(!adding)} style={dark}><Plus size={14} /> a receber</button>
         </div>
-        {openNames.length === 0 && <div style={{ fontSize: 12.5, color: C.good, marginTop: 6 }}>Ninguém te deve nada agora.</div>}
-        {openNames.map((n) => (
-          <div key={n} style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "9px 0", borderTop: `1px solid ${C.line}`, marginTop: 6 }}>
-            <Dot color={C.sun} /><span style={{ fontSize: 13.5, fontWeight: 500, flex: 1 }}>{n}</span>
-            <span style={{ fontSize: 11.5, color: C.faint, display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              {Object.keys(open[n].months).sort().map((m) => (
-                <button key={m} onClick={() => setYm(m)} style={{ ...iconbtn, display: "inline", padding: 0, fontSize: 11.5, fontFamily: "inherit", color: m === ym ? C.ink : C.accent, fontWeight: m === ym ? 600 : 400 }}>{ymLabel(m)}</button>
-              ))}
-            </span>
-            <span style={{ fontSize: 13.5, fontWeight: 600, minWidth: 86, textAlign: "right" }}>{brl(open[n].amount)}</span>
-          </div>
-        ))}
-        {openNames.length > 0 && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>Toque no mês para ver o detalhe e marcar o que já foi pago.</div>}
       </div>
+      {allNames.length > 1 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+          {[null, ...allNames].map((n) => <button key={n || "_todos"} onClick={() => setOnly(n)} style={{ ...btn, padding: "5px 10px", fontSize: 12, borderRadius: 99, background: only === n ? C.ink : C.surface, color: only === n ? "#fff" : C.sub, borderColor: only === n ? C.ink : C.line }}>{n || "Todas as pessoas"}</button>)}
+        </div>
+      )}
 
       {adding && (
         <div style={{ ...card, padding: 14, marginTop: 10, display: "flex", flexDirection: "column", gap: 10, borderStyle: "dashed", borderColor: C.accent }}>
@@ -1186,7 +1271,7 @@ function CobrancasView({ data, ym, setYm, patchMonth, say, people, addPerson }) 
         </div>
       )}
 
-      <Title>Em {ymLabel(ym)}</Title>
+      <Title>Por pessoa</Title>
       {names.length === 0 && <div style={{ ...card, padding: 16, fontSize: 12.5, color: C.faint, borderStyle: "dashed", lineHeight: 1.5 }}>Nada a receber neste mês. Entram aqui sozinhos os lançamentos marcados como de outra pessoa, os cartões emprestados e as compras divididas.</div>}
       {names.map((name) => {
         const list = byWho[name]; const tot = sum(list); const got = sum(list.filter((i) => i.received)); const done = got >= tot && tot > 0;
@@ -1218,6 +1303,21 @@ function CobrancasView({ data, ym, setYm, patchMonth, say, people, addPerson }) 
           </div>
         );
       })}
+      {olderNames.length > 0 && <>
+        <Title>Pendente de meses anteriores</Title>
+        <div style={{ ...card, padding: "4px 15px" }}>
+          {olderNames.map((n, i) => (
+            <div key={n} style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "10px 0", borderTop: i ? `1px solid ${C.line}` : "none" }}>
+              <span style={{ fontSize: 13.5, flex: 1 }}>{n}</span>
+              <span style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                {Object.keys(older[n].months).sort().map((m) => <button key={m} onClick={() => setYm(m)} style={{ ...iconbtn, display: "inline", padding: 0, fontSize: 11.5, fontFamily: "inherit", color: C.accent }}>{ymLabel(m)}</button>)}
+              </span>
+              <span style={{ fontSize: 13.5, fontWeight: 600, color: C.bad, minWidth: 80, textAlign: "right" }}>{brl(older[n].amount)}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 11.5, color: C.faint, margin: "6px 2px" }}>Toque no mês para abrir e marcar o que já foi pago.</div>
+      </>}
     </div>
   );
 }
@@ -1355,13 +1455,13 @@ function CardForm({ initial, cats, onSave, onCancel, onArchive, people, addPerso
       {mode === "so_fatura" && <>
         <div style={{ fontSize: 11.5, color: C.faint }}>Para cartão emprestado: você só informa o total da fatura todo mês, sem lançamentos.</div>
         <div style={{ display: "flex", gap: 8 }}>
-          <Field label="Quem usa"><PeopleSelect value={usedBy} people={people} onAdd={addPerson} ours="Ninguém, é nosso" onChange={setUsedBy} /></Field>
+          <Field label="Quem usa"><PeopleSelect value={usedBy} people={people} onAdd={addPerson} ours={`Ninguém, é de ${CASAL}`} onChange={setUsedBy} /></Field>
           {!usedBy.trim() && <Field label="Categoria"><CatSelect cats={cats} value={cat} onChange={setCat} /></Field>}
         </div>
       </>}
       {mode === "detalhado" && <>
         <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 2 }}>Cartões dentro desta fatura</div>
-        <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.45 }}>Separe pelo final do cartão, não pelo nome impresso na fatura. Se o adicional é de outra pessoa, preencha de quem é: tudo dele vira cobrança e não entra nos gastos de vocês.</div>
+        <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.45 }}>Separe pelo final do cartão, não pelo nome impresso na fatura. Se o adicional é de outra pessoa, preencha de quem é: tudo dele vai para A receber e não entra nos gastos de vocês.</div>
         {subs.map((s) => (
           <div key={s.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <input style={{ ...input, flex: 1 }} value={s.label} onChange={(e) => setSub(s.id, { label: e.target.value })} placeholder="final 1234" />
