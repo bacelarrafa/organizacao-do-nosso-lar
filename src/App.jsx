@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import {
   Home, Calendar, Check, Plus, Trash2, Briefcase, Utensils, HeartPulse,
   RefreshCw, ChevronLeft, ChevronRight, ChevronDown, User, X, Flame, TrendingUp,
-  Stethoscope, Lightbulb, ArrowRight, Target, Sun, CalendarDays, Pencil, LogOut, Heart, CircleSlash, MoreHorizontal, Cat
+  Stethoscope, Lightbulb, ArrowRight, Target, Sun, CalendarDays, Pencil, LogOut, Heart, CircleSlash, MoreHorizontal, Cat, Wallet
 } from "lucide-react";
 
 const SEED_PEOPLE = {
@@ -202,6 +202,8 @@ const EMPTY_WEEK = { done: {}, presence: {}, skip: {}, move: {}, add: {}, meals:
 import { supabase } from "./supabaseClient";
 import Recolocacao, { allPaused } from "./Recolocacao";
 import Metas from "./Metas";
+import Financas from "./Financas";
+import { useSession, LoginScreen } from "./Login";
 
 // One household row holds everything. We load it once, subscribe to
 // realtime changes (so the other person's edits appear live), and
@@ -303,11 +305,16 @@ function useHousehold(code) {
 // Se quiserem, troquem por algo só de vocês (ex: "lar-bacellar-2024").
 const HOUSEHOLD_CODE = "lar-rafa-lucas";
 
+// Login obrigatório: o app tem dados pessoais (finanças, metas, saúde).
+// Usa os mesmos usuários do Próximo Lar, que fica no mesmo projeto Supabase.
 export default function App() {
-  return <Routine />;
+  const session = useSession();
+  if (session === undefined) return null;
+  if (!session) return <LoginScreen />;
+  return <Routine email={session.user?.email} />;
 }
 
-function Routine() {
+function Routine({ email }) {
   const code = HOUSEHOLD_CODE;
   const [tab, setTab] = useState("hoje");
   const [openActions, setOpenActions] = useState(null); // id da tarefa com o painel "só hoje" aberto
@@ -587,6 +594,7 @@ function Routine() {
     { id: "semana", label: "Semana", icon: CalendarDays, tabs: [["semana", "Agenda"], ["presencial", "Presencial"], ["saude", "Refeições e saúde"]] },
     // Recolocação some da navegação quando os dois pausaram a busca (dá pra retomar pela aba Metas)
     { id: "planos", label: "Planos", icon: Target, tabs: [["metas", `Metas ${PEOPLE.rafa.name}`], ...(allPaused(jobsearch) && tab !== "vagas" ? [] : [["vagas", "Recolocação"]])] },
+    { id: "financas", label: "Finanças", icon: Wallet, tabs: [["fin-mes", "Mês"], ["fin-painel", "Painel"], ["fin-cartoes", "Cartões"], ["fin-parcelas", "Parcelas"], ["fin-cobrancas", "Cobranças"], ["fin-cadastros", "Cadastros"]] },
     { id: "casa", label: "Casa", icon: Home, tabs: [["rotina", "Rotina"], ["historico", "Histórico"]] },
   ];
   const section = SECTIONS.find((s) => s.tabs.some(([id]) => id === tab)) || SECTIONS[0];
@@ -638,6 +646,11 @@ function Routine() {
       {/* ---------- RECOLOCAÇÃO ---------- */}
       {tab === "vagas" && (
         <Recolocacao jobsearch={jobsearch} setJobsearch={setJobsearch} />
+      )}
+
+      {/* ---------- FINANÇAS ---------- */}
+      {tab.startsWith("fin-") && (
+        <Financas code={code} view={tab} email={email} onGo={(id) => { goTab(id); if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" }); }} />
       )}
 
       {/* ---------- METAS PESSOAIS ---------- */}
@@ -1103,6 +1116,10 @@ function Routine() {
 
       <div style={{ marginTop: 28, textAlign: "center" }}>
         <div style={{ fontSize: 11.5, color: C.faint }}>Tudo salvo e sincronizado entre vocês dois.</div>
+        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
+          Conectado como {email}.{" "}
+          <button onClick={() => supabase.auth.signOut()} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 11.5, color: C.accent, fontFamily: "inherit" }}>Sair</button>
+        </div>
       </div>
 
       <BottomNav sections={SECTIONS} active={section.id} onGo={goSection} badge={{ hoje: Math.max(0, todayCounts.total - todayCounts.done) }} />
