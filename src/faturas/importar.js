@@ -17,6 +17,9 @@ const occurs = (t, ym) => {
   return i >= 0 && (t.parcel || 1) + i <= (t.parcels || 1);
 };
 const norm = (s) => (s || "").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+// Palavras que querem dizer "é do casal", nunca nome de pessoa
+const OURS = /^(nosso|nossa|nós|nos|casal|eu|meu|minha|de nosso|da gente)$/i;
+export const cleanWho = (w) => { const s = (w || "").trim(); return OURS.test(s) ? "" : s; };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 // A ordem importa: a primeira regra que bate decide.
@@ -71,7 +74,7 @@ export function guessSubs(data, parsed, cardId, people = []) {
   const out = {};
   parsed.cards.forEach((pc) => {
     const existing = (card?.subs || []).find((s) => (s.label || "").includes(pc.key));
-    if (existing) { out[pc.key] = { subId: existing.id, label: existing.label, who: existing.who || "" }; return; }
+    if (existing) { out[pc.key] = { subId: existing.id, label: existing.label, who: cleanWho(existing.who) }; return; }
     const fw = firstWord(pc.holder).toUpperCase();
     let who = "";
     if (pc.holder && titular && fw && fw !== titular) {
@@ -91,9 +94,9 @@ export function planImport(data, parsed, { cardId, month, subs }) {
     if (s.subId) { subIdOf[key] = s.subId; return; }
     const id = uid();
     subIdOf[key] = id;
-    newSubs.push({ id, label: s.label, who: s.who || "" });
+    newSubs.push({ id, label: s.label, who: cleanWho(s.who) });
   });
-  const whoOfKey = (key) => (subs[key]?.who || "").trim();
+  const whoOfKey = (key) => cleanWho(subs[key]?.who);
 
   const pool = data.txs.filter((t) => t.cardId === cardId).map((t) => ({ ...t })); // cópia para simular
   const updates = {};
