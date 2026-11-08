@@ -6,7 +6,9 @@ import {
 import { supabase } from "./supabaseClient";
 import { pagesFromPdf } from "./faturas/pdfText";
 import { parseFatura } from "./faturas/parsers";
-import { planImport, applyPlan, guessCard, guessSubs, cleanWho, suggestCategory } from "./faturas/importar";
+import { planImport, applyPlan, guessCard, guessSubs, cleanWho, suggestCategory, faturaMonthOf } from "./faturas/importar";
+import { parseOfx } from "./faturas/ofx";
+import { readPrints } from "./faturas/prints";
 
 /* =========================================================
    Módulo Finanças.
@@ -774,7 +776,7 @@ function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, pe
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 12.5, color: C.sub }}>Fatura de {ymLabel(ym)}, {c.name}</div>
             <div className="lar-display" style={{ fontSize: 24, fontWeight: 600 }}>{brl(sum(occs))}</div>
-            <div style={{ fontSize: 11.5, color: C.faint }}>{occs.length} lançamentos{owners.length ? `, ${brl(sum(occs, thirdAmount))} de outras pessoas` : ""}</div>
+            <div style={{ fontSize: 11.5, color: C.faint }}>{occs.some((t) => t.prev) ? `${occs.filter((t) => t.prev).length} em prévia, aguardando o PDF. ` : ""}{occs.length} lançamentos{owners.length ? `, ${brl(sum(occs, thirdAmount))} de outras pessoas` : ""}</div>
           </div>
           <button onClick={() => setMenu(!menu)} aria-label="Mais opções" style={{ ...iconbtn, padding: 6 }}><MoreHorizontal size={18} /></button>
         </div>
@@ -807,6 +809,7 @@ function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, pe
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.desc}</div>
                     <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 3, fontSize: 11.5, color: C.faint, flexWrap: "wrap" }}>
+                      {t.prev && <span style={{ color: C.sun, fontWeight: 600 }}>prévia</span>}
                       {t.date && <span>{ddmm(t.date)}</span>}
                       {who ? <span style={{ color: C.sun }}>de {who}</span>
                         : t.cat ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Dot color={cat.color} s={6} />{cat.name}</span>
@@ -953,40 +956,57 @@ function loadPdfjs() {
 }
 
 function ImportarFaturas({ data, update, people, addPerson, say, onDone }) {
-  const [items, setItems] = useState([]); // { id, name, file, status: lendo|senha|erro|pronto, parsed, error }
+  const [items, setItems] = useState([]); // { id, name, kind: pdf|ofx|print, files, status: lendo|senha|erro|pronto, parsed, error }
   const inputRef = useRef(null);
+  const setIt = (id, patch) => setItems((l) => l.map((x) => (x.id === id ? { ...x, ...patch } : x)));
   const read = async (it, password) => {
-    setItems((l) => l.map((x) => (x.id === it.id ? { ...x, status: "lendo", error: null } : x)));
+    setIt(it.id, { status: "lendo", error: null });
     try {
-      const pdfjs = await loadPdfjs();
-      const bytes = new Uint8Array(await it.file.arrayBuffer());
-      const pages = await pagesFromPdf(pdfjs, bytes, password);
-      const parsed = parseFatura(pages);
-      setItems((l) => l.map((x) => (x.id === it.id ? { ...x, status: parsed.bank ? "pronto" : "erro", parsed, error: parsed.bank ? null : parsed.warnings[0] } : x)));
+      let parsed;
+      if (it.kind === "pdf") {
+        const pdfjs = await loadPdfjs();
+        const pages = await pagesFromPdf(pdfjs, new Uint8Array(await it.files[0].arrayBuffer()), password);
+        parsed = parseFatura(pages);
+      } else if (it.kind === "ofx") {
+        parsed = parseOfx(await it.files[0].text());
+      } else {
+        parsed = await readPrints(it.files);
+      }
+      const ok = parsed.bank && parsed.lines.length;
+      setIt(it.id, { status: ok ? "pronto" : "erro", parsed, error: ok ? null : parsed.warnings[0] });
     } catch (e) {
       const needs = e?.name === "PasswordException";
-      setItems((l) => l.map((x) => (x.id === it.id ? { ...x, status: needs ? "senha" : "erro", error: needs ? (password ? "Senha incorreta. Tente de novo." : null) : "Não consegui abrir este PDF." } : x)));
+      setIt(it.id, { status: needs ? "senha" : "erro", error: needs ? (password ? "Senha incorreta. Tente de novo." : null) : e?.message || "Não consegui ler o arquivo." });
     }
   };
   const pick = (files) => {
-    const list = [...files].filter((f) => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name)).map((f) => ({ id: uid(), name: f.name, file: f, status: "lendo" }));
+    const all = [...files];
+    const pdfs = all.filter((f) => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name));
+    const ofxs = all.filter((f) => /\.(ofx|qfx)$/i.test(f.name));
+    const imgs = all.filter((f) => /^image\//.test(f.type) || /\.(png|jpe?g|heic|webp)$/i.test(f.name));
+    const list = [
+      ...pdfs.map((f) => ({ id: uid(), name: f.name, kind: "pdf", files: [f], status: "lendo" })),
+      ...ofxs.map((f) => ({ id: uid(), name: f.name, kind: "ofx", files: [f], status: "lendo" })),
+      ...(imgs.length ? [{ id: uid(), name: imgs.length === 1 ? "1 print" : `${imgs.length} prints`, kind: "print", files: imgs, status: "lendo" }] : []),
+    ];
+    if (!list.length) { say("Escolha um PDF, um OFX ou prints"); return; }
     setItems((l) => [...l, ...list]);
     list.forEach((it) => read(it));
   };
   const drop = (id) => setItems((l) => l.filter((x) => x.id !== id));
   return (
     <div style={{ marginBottom: 14 }}>
-      <input ref={inputRef} type="file" accept="application/pdf,.pdf" multiple style={{ display: "none" }} onChange={(e) => { pick(e.target.files); e.target.value = ""; }} />
+      <input ref={inputRef} type="file" accept="application/pdf,.pdf,.ofx,.qfx,image/*" multiple style={{ display: "none" }} onChange={(e) => { pick(e.target.files); e.target.value = ""; }} />
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <button onClick={() => inputRef.current?.click()} style={{ ...dark, padding: "8px 13px" }}><FileUp size={14} /> Importar fatura em PDF</button>
-        <span style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.35 }}>Itaú, Nubank, Santander e Mercado Pago</span>
+        <button onClick={() => inputRef.current?.click()} style={{ ...dark, padding: "8px 13px" }}><FileUp size={14} /> Importar</button>
+        <span style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.35 }}>Prints ou OFX durante o mês (prévia). PDF da fatura no fechamento.</span>
       </div>
       {items.map((it) => (
         <div key={it.id} style={{ marginTop: 10 }}>
-          {it.status === "lendo" && <div style={{ ...card, padding: 14, fontSize: 13, color: C.sub }}>Lendo {it.name}…</div>}
+          {it.status === "lendo" && <div style={{ ...card, padding: 14, fontSize: 13, color: C.sub }}>{it.kind === "print" ? `Lendo ${it.name}. Pode levar alguns segundos…` : `Lendo ${it.name}…`}</div>}
           {it.status === "erro" && <div style={{ ...card, padding: 14, fontSize: 13, color: C.bad, display: "flex", gap: 8, alignItems: "center" }}><span style={{ flex: 1 }}>{it.name}: {it.error}</span><button onClick={() => drop(it.id)} style={iconbtn}><X size={15} /></button></div>}
           {it.status === "senha" && <PdfPassword name={it.name} error={it.error} onTry={(pw) => read(it, pw)} onCancel={() => drop(it.id)} />}
-          {it.status === "pronto" && <RevisarFatura key={it.id} name={it.name} parsed={it.parsed} data={data} people={people} addPerson={addPerson}
+          {it.status === "pronto" && <RevisarFatura key={it.id} name={it.name} parsed={it.parsed} mode={it.kind === "pdf" ? "fatura" : "previa"} data={data} people={people} addPerson={addPerson}
             onCancel={() => drop(it.id)}
             onImport={({ cardId, newCard, month, plan }) => {
               update((d) => {
@@ -994,7 +1014,7 @@ function ImportarFaturas({ data, update, people, addPerson, say, onDone }) {
                 const names = plan.newSubs.map((x) => x.who).filter((w) => w && !next.people.some((p) => p.name === w));
                 return names.length ? { ...next, people: [...next.people, ...Array.from(new Set(names)).map((n) => ({ id: uid(), name: n }))] } : next;
               });
-              say(`${plan.count} lançamentos importados`);
+              say(it.kind === "pdf" ? `Fatura importada${plan.reconciled ? `, ${plan.reconciled} prévias conferidas` : ""}` : `${plan.count} lançamentos em prévia`);
               drop(it.id);
               onDone && onDone(cardId, month);
             }} />}
@@ -1019,41 +1039,64 @@ function PdfPassword({ name, error, onTry, onCancel }) {
   );
 }
 
-function RevisarFatura({ name, parsed, data, people, addPerson, onImport, onCancel }) {
-  const dueYm = parsed.due ? parsed.due.slice(0, 7) : ymNow();
-  const [month, setMonth] = useState(dueYm);
-  const [cardId, setCardId] = useState(guessCard(data, parsed) || "__novo");
-  const [newName, setNewName] = useState(`${parsed.bankName}${parsed.cards[0] && /^\d{4}$/.test(parsed.cards[0].key) ? ` final ${parsed.cards[0].key}` : ""}`);
-  const [subs, setSubs] = useState(() => guessSubs(data, parsed, cardId === "__novo" ? null : cardId, people));
-  const [showLines, setShowLines] = useState(false);
-  useEffect(() => { setSubs(guessSubs(data, parsed, cardId === "__novo" ? null : cardId, people)); }, [cardId]);
-  const realCardId = cardId === "__novo" ? "__novo" : cardId;
-  const plan = useMemo(() => planImport(data, parsed, { cardId: realCardId, month, subs }), [data, parsed, realCardId, month, subs]);
+function RevisarFatura({ name, parsed, mode, data, people, addPerson, onImport, onCancel }) {
+  const previa = mode === "previa";
+  const firstCard = guessCard(data, parsed) || "__novo";
+  const monthFor = (cid) => {
+    if (!previa) return parsed.due ? parsed.due.slice(0, 7) : ymNow();
+    const c = data.cards.find((x) => x.id === cid);
+    const ref = parsed.end || parsed.lines.map((l) => l.date).filter(Boolean).sort().pop();
+    return (c && c.fechamento && ref ? faturaMonthOf(c, parsed.end ? ref : ref) : null) || (parsed.end ? parsed.end.slice(0, 7) : ymNow());
+  };
+  const [cardId, setCardId] = useState(firstCard);
+  const [month, setMonth] = useState(() => monthFor(firstCard));
+  const [newName, setNewName] = useState(`${parsed.bankName}${parsed.cardFinal ? ` final ${parsed.cardFinal}` : parsed.cards[0] && /^\d{4}$/.test(parsed.cards[0].key) ? ` final ${parsed.cards[0].key}` : ""}`);
+  const ours = CASAL.split(/\s+e\s+/);
+  const [subs, setSubs] = useState(() => guessSubs(data, parsed, firstCard === "__novo" ? null : firstCard, people, ours));
+  const [showLines, setShowLines] = useState(previa);
+  const [out, setOut] = useState(() => new Set()); // linhas que você tirou antes de importar
+  const [dropLeft, setDropLeft] = useState(true);
+  useEffect(() => { setSubs(guessSubs(data, parsed, cardId === "__novo" ? null : cardId, people, ours)); setMonth(monthFor(cardId)); }, [cardId]);
+  const lines = parsed.lines.filter((_, i) => !out.has(i));
+  const parsedIn = { ...parsed, lines };
+  const base = useMemo(() => planImport(data, parsedIn, { cardId, month, subs, mode }), [data, parsed, out, cardId, month, subs, mode]);
+  const plan = { ...base, removeIds: !previa && dropLeft ? base.leftover.map((t) => t.id) : [] };
   const detailed = data.cards.filter((c) => c.mode !== "so_fatura" && !c.archived);
   const okTotal = parsed.total != null && Math.abs(parsed.sum - parsed.total) <= 0.05;
   const catName = (id) => data.categories.find((c) => c.id === id)?.name || "sem categoria";
-  const byKey = (k) => parsed.lines.filter((l) => l.key === k);
+  const byKey = (k) => lines.filter((l) => l.key === k);
+  const ownerCard = data.cards.find((c) => c.id === cardId);
   const go = () => {
     if (cardId === "__novo") {
       if (!newName.trim()) return;
       const id = uid();
       const newCard = { id, name: newName.trim(), mode: "detalhado", subs: [], usedBy: "", cat: null, archived: false };
-      onImport({ cardId: id, newCard, month, plan: planImport({ ...data, cards: [...data.cards, newCard] }, parsed, { cardId: id, month, subs }) });
+      const p2 = planImport({ ...data, cards: [...data.cards, newCard] }, parsedIn, { cardId: id, month, subs, mode });
+      onImport({ cardId: id, newCard, month, plan: { ...p2, removeIds: [] } });
     } else onImport({ cardId, month, plan });
   };
+  const toggleOut = (i) => setOut((s0) => { const n = new Set(s0); n.has(i) ? n.delete(i) : n.add(i); return n; });
+  const nothing = !plan.count && !Object.keys(plan.updates).length && !plan.removeIds.length;
   return (
     <div style={{ ...card, padding: 14, display: "flex", flexDirection: "column", gap: 11, borderColor: C.accent }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="lar-display" style={{ fontSize: 15.5, fontWeight: 600 }}>{parsed.bankName}, vence {parsed.due ? ddmm(parsed.due) : "?"}</div>
+          <div className="lar-display" style={{ fontSize: 15.5, fontWeight: 600 }}>{previa ? `Prévia: ${parsed.bankName}` : `${parsed.bankName}, vence ${parsed.due ? ddmm(parsed.due) : "?"}`}</div>
           <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</div>
         </div>
         <button onClick={onCancel} style={iconbtn} aria-label="Descartar"><X size={16} /></button>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 11px", borderRadius: 10, background: okTotal ? C.goodSoft : C.sunSoft, fontSize: 12.5, color: okTotal ? C.good : "#7A5B1E" }}>
-        {okTotal ? <Check size={15} /> : <AlertTriangle size={15} />}
-        <span>{okTotal ? `Li ${parsed.lines.length} lançamentos e a soma bate com o total da fatura (${brl(parsed.total)}).` : (parsed.warnings[0] || `Soma lida ${brl(parsed.sum)}.`)}</span>
-      </div>
+      {previa ? (
+        <div style={{ padding: "9px 11px", borderRadius: 10, background: C.sunSoft, fontSize: 12.5, color: "#7A5B1E", lineHeight: 1.45 }}>
+          Li {parsed.lines.length} lançamentos. Eles entram como prévia e contam no mês; quando você subir o PDF da fatura, o app confere um a um.
+          {parsed.warnings.map((w, i) => <div key={i} style={{ marginTop: 4 }}>{w}</div>)}
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 11px", borderRadius: 10, background: okTotal ? C.goodSoft : C.sunSoft, fontSize: 12.5, color: okTotal ? C.good : "#7A5B1E" }}>
+          {okTotal ? <Check size={15} /> : <AlertTriangle size={15} />}
+          <span>{okTotal ? `Li ${parsed.lines.length} lançamentos e a soma bate com o total da fatura (${brl(parsed.total)}).` : (parsed.warnings[0] || `Soma lida ${brl(parsed.sum)}.`)}</span>
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 8 }}>
         <Field label="Mês da fatura"><input type="month" style={input} value={month} onChange={(e) => e.target.value && setMonth(e.target.value)} /></Field>
@@ -1065,46 +1108,61 @@ function RevisarFatura({ name, parsed, data, people, addPerson, onImport, onCanc
         </Field>
       </div>
       {cardId === "__novo" && <Field label="Nome do cartão novo"><input style={input} value={newName} onChange={(e) => setNewName(e.target.value)} /></Field>}
+      {previa && ownerCard && !ownerCard.fechamento && <div style={{ fontSize: 11.5, color: C.faint }}>Dica: cadastre o dia de fechamento deste cartão em Cadastros para o app acertar o mês sozinho.</div>}
 
-      <div>
-        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>Cartões nesta fatura</div>
-        <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 8, lineHeight: 1.45 }}>Confira pelo final, não pelo nome impresso. Nos adicionais de outra pessoa, escolha de quem é: os lançamentos dela vão para A receber. Dá para mudar depois em cada lançamento.</div>
-        {parsed.cards.map((pc) => {
-          const s = subs[pc.key] || { label: pc.key, who: "" };
-          const ls = byKey(pc.key);
-          return (
-            <div key={pc.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderTop: `1px solid ${C.line}` }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 500 }}>{s.label}</div>
-                <div style={{ fontSize: 11, color: C.faint }}>{[pc.holder, `${ls.length} lançamentos`, brl(sum(ls))].filter(Boolean).join(", ")}</div>
+      {parsed.cards.some((pc) => pc.key !== "principal") && (
+        <div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>Cartões nesta {previa ? "leitura" : "fatura"}</div>
+          <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 8, lineHeight: 1.45 }}>Nos adicionais de outra pessoa, escolha de quem é: os lançamentos dela vão para A receber. Dá para mudar depois em cada lançamento.</div>
+          {parsed.cards.filter((pc) => pc.key !== "principal").map((pc) => {
+            const sb = subs[pc.key] || { label: pc.key, who: "" };
+            const ls = byKey(pc.key);
+            return (
+              <div key={pc.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderTop: `1px solid ${C.line}` }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500 }}>{sb.label}</div>
+                  <div style={{ fontSize: 11, color: C.faint }}>{[pc.holder, `${ls.length} lançamentos`, brl(sum(ls))].filter(Boolean).join(", ")}</div>
+                </div>
+                <PeopleSelect value={cleanWho(sb.who)} people={people} onAdd={addPerson} onChange={(v) => setSubs((m) => ({ ...m, [pc.key]: { ...sb, who: v } }))}
+                  style={{ width: 130, padding: "7px 9px", fontSize: 12.5, background: cleanWho(sb.who) ? C.sunSoft : "#F7F9FC" }} />
               </div>
-              <PeopleSelect value={cleanWho(s.who)} people={people} onAdd={addPerson} onChange={(v) => setSubs((m) => ({ ...m, [pc.key]: { ...s, who: v } }))}
-                style={{ width: 130, padding: "7px 9px", fontSize: 12.5, background: cleanWho(s.who) ? C.sunSoft : "#F7F9FC" }} />
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
 
       <div style={{ background: "#F5F7FB", borderRadius: 10, padding: "10px 12px", fontSize: 12.5, color: C.sub, lineHeight: 1.6 }}>
-        <div><b style={{ color: C.ink, fontWeight: 600 }}>{plan.count}</b> lançamentos novos em {ymLabel(month)}{plan.skipped ? `, ${plan.skipped} já estavam no app e serão ignorados` : ""}.</div>
+        <div><b style={{ color: C.ink, fontWeight: 600 }}>{plan.count}</b> {previa ? "novos em prévia" : "lançamentos novos"} em {ymLabel(month)}{plan.skipped ? `, ${plan.skipped} já estavam no app (parcelas antigas ou prints repetidos)` : ""}.</div>
+        {!previa && plan.reconciled > 0 && <div style={{ color: C.good }}>{plan.reconciled} prévias conferidas com a fatura. Categoria, divisão e "de quem" que você já tinha feito continuam.</div>}
         {plan.thirdCount > 0 && <div>{plan.thirdCount} são de outras pessoas e vão para A receber.</div>}
         {plan.uncategorized > 0 && <div>{plan.uncategorized} ficam sem categoria para você revisar.</div>}
-        {Object.keys(plan.updates).length > 0 && <div>{Object.keys(plan.updates).length} parcelas já lançadas em meses seguintes foram reconhecidas.</div>}
-        {month !== dueYm && <div style={{ color: "#7A5B1E" }}>Atenção: o vencimento é em {ymLabel(dueYm)}.</div>}
       </div>
 
-      <button onClick={() => setShowLines(!showLines)} style={{ ...iconbtn, display: "inline-flex", gap: 4, alignSelf: "flex-start", fontSize: 12, color: C.sub, fontFamily: "inherit" }}>{showLines ? <ChevronUp size={13} /> : <ChevronDown size={13} />} {showLines ? "esconder" : "ver"} lançamentos</button>
+      {!previa && base.leftover.length > 0 && (
+        <div style={{ border: `1px solid #F0E2C4`, background: C.sunSoft, borderRadius: 10, padding: "10px 12px", fontSize: 12.5, color: "#7A5B1E" }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{base.leftover.length} prévias não apareceram nesta fatura</div>
+          {base.leftover.slice(0, 6).map((t) => <div key={t.id} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}><span>{t.date ? ddmm(t.date) + " " : ""}{t.desc}</span><span>{brl(t.amount)}</span></div>)}
+          {base.leftover.length > 6 && <div>e mais {base.leftover.length - 6}</div>}
+          <label style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 8, cursor: "pointer" }}>
+            <input type="checkbox" checked={dropLeft} onChange={(e) => setDropLeft(e.target.checked)} /> Apagar essas prévias (podem ter caído na fatura seguinte ou sido canceladas)
+          </label>
+        </div>
+      )}
+
+      <button onClick={() => setShowLines(!showLines)} style={{ ...iconbtn, display: "inline-flex", gap: 4, alignSelf: "flex-start", fontSize: 12, color: C.sub, fontFamily: "inherit" }}>{showLines ? <ChevronUp size={13} /> : <ChevronDown size={13} />} {showLines ? "esconder" : "ver"} o que foi lido</button>
       {showLines && (
-        <div style={{ maxHeight: 280, overflowY: "auto", borderTop: `1px solid ${C.line}` }}>
-          {plan.add.map((t) => {
-            const owner = data.cards.find((c) => c.id === cardId);
-            const who = [...(owner?.subs || []), ...plan.newSubs].find((x) => x.id === t.sub)?.who;
+        <div style={{ maxHeight: 320, overflowY: "auto", borderTop: `1px solid ${C.line}` }}>
+          {previa && <div style={{ fontSize: 11.5, color: C.faint, padding: "6px 0" }}>Confira a leitura. Desmarque o que estiver errado para não importar.</div>}
+          {parsed.lines.map((l, i) => {
+            const isOut = out.has(i);
+            const who = cleanWho(subs[l.key]?.who);
             return (
-              <div key={t.id} style={{ display: "flex", gap: 8, padding: "6px 0", borderBottom: `1px solid ${C.line}`, fontSize: 12 }}>
-                <span style={{ color: C.faint, width: 38 }}>{ddmm(t.date)}</span>
-                <span style={{ flex: 1, minWidth: 0 }}>{t.desc}{(t.parcels || 1) > 1 ? ` (${t.parcel}/${t.parcels})` : ""}<span style={{ color: who ? C.sun : C.faint }}> {who ? `de ${who}` : t.cat ? catName(t.cat) : "sem categoria"}</span></span>
-                <span style={{ whiteSpace: "nowrap" }}>{brl(t.amount)}</span>
-              </div>
+              <label key={i} style={{ display: "flex", gap: 8, padding: "6px 0", borderBottom: `1px solid ${C.line}`, fontSize: 12, alignItems: "center", opacity: isOut ? 0.45 : 1, cursor: "pointer" }}>
+                <input type="checkbox" checked={!isOut} onChange={() => toggleOut(i)} />
+                <span style={{ color: C.faint, width: 38 }}>{l.date ? ddmm(l.date) : "?"}</span>
+                <span style={{ flex: 1, minWidth: 0 }}>{l.desc}{l.parcels > 1 ? ` (${l.parcel}/${l.parcels})` : ""}{who ? <span style={{ color: C.sun }}> de {who}</span> : null}</span>
+                <span style={{ whiteSpace: "nowrap", color: l.amount < 0 ? C.good : C.ink }}>{brl(l.amount)}</span>
+              </label>
             );
           })}
         </div>
@@ -1112,7 +1170,7 @@ function RevisarFatura({ name, parsed, data, people, addPerson, onImport, onCanc
 
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={onCancel} style={{ ...btn, flex: 1, justifyContent: "center" }}>descartar</button>
-        <button onClick={go} disabled={!plan.count && cardId !== "__novo"} style={{ ...dark, flex: 2, justifyContent: "center", opacity: plan.count ? 1 : 0.5 }}>importar {plan.count} lançamentos</button>
+        <button onClick={go} disabled={nothing && cardId !== "__novo"} style={{ ...dark, flex: 2, justifyContent: "center", opacity: nothing ? 0.5 : 1 }}>{previa ? `importar ${plan.count} em prévia` : plan.reconciled ? `importar e conferir` : `importar ${plan.count} lançamentos`}</button>
       </div>
     </div>
   );
@@ -1412,7 +1470,7 @@ function CadastrosView({ data, update, say, email, people, addPerson }) {
               <Pencil size={13} color={C.faint} />
             </div>
             <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
-              {c.mode === "so_fatura" ? `Só o valor da fatura${c.usedBy ? `, cobrado de ${c.usedBy}` : ""}` : `Lançamentos detalhados${(c.subs || []).length ? `, ${c.subs.map((s) => `${s.label || "sem final"}${s.who ? ` (${s.who})` : ""}`).join(", ")}` : ""}`}
+              {c.fechamento ? `Fecha dia ${c.fechamento}${c.vencimento ? `, vence dia ${c.vencimento}` : ""}. ` : "Sem dia de fechamento. "}{c.mode === "so_fatura" ? `Só o valor da fatura${c.usedBy ? `, cobrado de ${c.usedBy}` : ""}` : `Lançamentos detalhados${(c.subs || []).length ? `, ${c.subs.map((s) => `${s.label || "sem final"}${s.who ? ` (${s.who})` : ""}`).join(", ")}` : ""}`}
             </div>
           </div>
         ))}
@@ -1446,11 +1504,19 @@ function CardForm({ initial, cats, onSave, onCancel, onArchive, people, addPerso
   const [usedBy, setUsedBy] = useState(initial?.usedBy || "");
   const [cat, setCat] = useState(initial?.cat || "");
   const [subs, setSubs] = useState(initial?.subs || []);
-  const save = () => { if (!name.trim()) return; onSave({ name: name.trim(), mode, usedBy: mode === "so_fatura" ? cleanWho(usedBy) : "", cat: mode === "so_fatura" ? cat || null : null, subs: mode === "detalhado" ? subs.map((s) => ({ ...s, label: s.label.trim(), who: cleanWho(s.who) })) : [] }); };
+  const [fech, setFech] = useState(initial?.fechamento || "");
+  const [venc, setVenc] = useState(initial?.vencimento || "");
+  const day = (v) => { const n = parseInt(v); return n >= 1 && n <= 31 ? n : null; };
+  const save = () => { if (!name.trim()) return; onSave({ fechamento: day(fech), vencimento: day(venc), name: name.trim(), mode, usedBy: mode === "so_fatura" ? cleanWho(usedBy) : "", cat: mode === "so_fatura" ? cat || null : null, subs: mode === "detalhado" ? subs.map((s) => ({ ...s, label: s.label.trim(), who: cleanWho(s.who) })) : [] }); };
   const setSub = (id, patch) => setSubs((l) => l.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   return (
     <div style={{ ...card, padding: 14, marginBottom: 10, display: "flex", flexDirection: "column", gap: 10, borderStyle: "dashed", borderColor: C.accent }}>
       <Field label="Nome do cartão"><input style={input} autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Nubank Rafa" /></Field>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Field label="Fecha no dia"><input style={input} inputMode="numeric" value={fech} onChange={(e) => setFech(e.target.value)} placeholder="ex.: 6" /></Field>
+        <Field label="Vence no dia"><input style={input} inputMode="numeric" value={venc} onChange={(e) => setVenc(e.target.value)} placeholder="ex.: 13" /></Field>
+      </div>
+      <div style={{ fontSize: 11.5, color: C.faint, marginTop: -4 }}>Serve para o app saber em qual fatura cai cada compra das prévias.</div>
       <Seg value={mode} onChange={setMode} options={[["detalhado", "Lançamentos detalhados"], ["so_fatura", "Só o valor da fatura"]]} />
       {mode === "so_fatura" && <>
         <div style={{ fontSize: 11.5, color: C.faint }}>Para cartão emprestado: você só informa o total da fatura todo mês, sem lançamentos.</div>
