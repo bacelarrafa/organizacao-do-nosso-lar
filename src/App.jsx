@@ -594,7 +594,7 @@ function Routine({ email }) {
     { id: "semana", label: "Semana", icon: CalendarDays, tabs: [["semana", "Agenda"], ["presencial", "Presencial"], ["saude", "Refeições e saúde"]] },
     // Recolocação some da navegação quando os dois pausaram a busca (dá pra retomar pela aba Metas)
     { id: "planos", label: "Planos", icon: Target, tabs: [["metas", `Metas ${PEOPLE.rafa.name}`], ...(allPaused(jobsearch) && tab !== "vagas" ? [] : [["vagas", "Recolocação"]])] },
-    { id: "financas", label: "Finanças", icon: Wallet, tabs: [["fin-mes", "Mês"], ["fin-painel", "Painel"], ["fin-cartoes", "Cartões"], ["fin-parcelas", "Parcelas"], ["fin-cobrancas", "Cobranças"], ["fin-cadastros", "Cadastros"]] },
+    { id: "financas", label: "Finanças", icon: Wallet, tabs: [["fin-mes", "Mês"], ["fin-painel", "Painel"], ["fin-cartoes", "Cartões"], ["fin-parcelas", "Parcelas"], ["fin-cobrancas", "A receber"], ["fin-cadastros", "Cadastros"]] },
     { id: "casa", label: "Casa", icon: Home, tabs: [["rotina", "Rotina"], ["historico", "Histórico"]] },
   ];
   const section = SECTIONS.find((s) => s.tabs.some(([id]) => id === tab)) || SECTIONS[0];
