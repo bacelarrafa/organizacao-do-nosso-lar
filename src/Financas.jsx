@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Wallet, CreditCard, PiggyBank, Plus, X, ChevronLeft, ChevronRight, ChevronDown, ChevronUp,
-  Check, Trash2, Pencil, Users, LogOut, Layers, TrendingUp, Copy, Send, FileUp, AlertTriangle
+  Check, Trash2, Pencil, Users, LogOut, Layers, TrendingUp, Copy, Send, FileUp, AlertTriangle, MoreHorizontal
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { pagesFromPdf } from "./faturas/pdfText";
 import { parseFatura } from "./faturas/parsers";
-import { planImport, applyPlan, guessCard, guessSubs } from "./faturas/importar";
+import { planImport, applyPlan, guessCard, guessSubs, cleanWho, suggestCategory } from "./faturas/importar";
 
 /* =========================================================
    Módulo Finanças.
@@ -39,6 +39,28 @@ function normalize(d) {
   const x = { ...EMPTY_DATA, ...(d || {}) };
   if (!x.categories || !x.categories.length) x.categories = DEFAULT_CATEGORIES;
   x.savings = { ...EMPTY_DATA.savings, ...(x.savings || {}) };
+  // "nosso" digitado no campo de pessoa quer dizer "do casal": limpa e recupera a categoria
+  const fixed = new Set();
+  x.cards = (x.cards || []).map((c) => ({
+    ...c, usedBy: cleanWho(c.usedBy),
+    subs: (c.subs || []).map((sb) => { const w = cleanWho(sb.who); if (w !== (sb.who || "")) fixed.add(sb.id); return { ...sb, who: w }; }),
+  }));
+  const before = x;
+  x.txs = (x.txs || []).map((t) => {
+    let n = t;
+    if (t.owner != null && cleanWho(t.owner) !== t.owner) n = { ...n, owner: cleanWho(t.owner) };
+    if (!n.cat && fixed.has(n.sub)) { const c = suggestCategory(n.desc, null, before); if (c) n = { ...n, cat: c }; }
+    return n;
+  });
+  // cadastro de pessoas (terceiros): o que já está em uso entra sozinho
+  const known = new Set((x.people || []).map((p) => p.name));
+  const used = [
+    ...x.cards.flatMap((c) => [c.usedBy, ...c.subs.map((sb) => sb.who)]),
+    ...x.txs.map((t) => t.owner),
+    ...Object.values(x.months || {}).flatMap((m) => (m.receivables || []).map((r) => r.who)),
+  ].filter(Boolean);
+  x.people = [...(x.people || [])];
+  used.forEach((n) => { if (!known.has(n)) { known.add(n); x.people.push({ id: n, name: n }); } });
   return x;
 }
 
@@ -93,6 +115,8 @@ function instOcc(it, ym) {
   return i + 1;
 }
 const subOf = (card, subId) => (card?.subs || []).find((s) => s.id === subId) || null;
+// De quem é o lançamento: escolha feita no próprio lançamento, senão a do cartão adicional. "" = do casal.
+const ownerOf = (card, t) => (t.owner != null ? t.owner : subOf(card, t.sub)?.who || "");
 
 // Tudo que é de terceiros num mês: lançamentos de cartões adicionais de outra pessoa,
 // cartões emprestados e divisões/recebimentos lançados à mão.
@@ -108,8 +132,8 @@ function cobrancasOf(data, ym) {
     data.txs.forEach((t) => {
       if (t.cardId !== c.id) return;
       const o = txOcc(t, ym); if (!o) return;
-      const s = subOf(c, t.sub);
-      if (s?.who) items.push({ key: `tx:${t.id}`, who: s.who, desc: t.desc, date: t.date, amount: t.amount, origin: `${c.name}${s.label ? ` (${s.label})` : ""}`, parcel: (t.parcels || 1) > 1 ? `${o.curParcel}/${t.parcels}` : null });
+      const s = subOf(c, t.sub); const who = ownerOf(c, t);
+      if (who) items.push({ key: `tx:${t.id}`, who, desc: t.desc, date: t.date, amount: t.amount, origin: `${c.name}${s?.label ? ` (${s.label})` : ""}`, parcel: (t.parcels || 1) > 1 ? `${o.curParcel}/${t.parcels}` : null });
     });
   });
   (mo.receivables || []).forEach((r) => {
@@ -164,7 +188,7 @@ function spendByCat(data, ym) {
   m.cards.forEach(({ card, total, occs }) => {
     if (card.mode === "so_fatura") { if (!card.usedBy && total) add(card.cat, total, `Fatura ${card.name}`); return; }
     occs.forEach((t) => {
-      if (subOf(card, t.sub)?.who) return;
+      if (ownerOf(card, t)) return;
       const split = sum((mo.receivables || []).filter((r) => r.txId === t.id));
       const own = t.amount - split;
       if (own) add(t.cat, own, t.desc);
@@ -249,6 +273,27 @@ function CatSelect({ cats, value, onChange, allowEmpty = true, style }) {
     </select>
   );
 }
+// Escolha de pessoa: "" é do casal. Dá para cadastrar alguém novo direto daqui.
+function PeopleSelect({ value, onChange, people, onAdd, ours = "Nosso", style }) {
+  const list = Array.from(new Set([...(people || []), ...(value ? [value] : [])]));
+  return (
+    <select value={value || ""} style={{ ...input, padding: "8px 9px", ...style }}
+      onChange={(e) => {
+        const v = e.target.value;
+        if (v === "__add") {
+          const n = (window.prompt("Nome da pessoa") || "").trim();
+          if (n && cleanWho(n)) { onAdd && onAdd(n); onChange(n); }
+          return;
+        }
+        onChange(v);
+      }}>
+      {ours ? <option value="">{ours}</option> : <option value="" disabled>Escolha a pessoa</option>}
+      {list.map((p) => <option key={p} value={p}>{p}</option>)}
+      <option value="__add">+ Cadastrar pessoa</option>
+    </select>
+  );
+}
+
 function MonthNav({ ym, setYm }) {
   const now = ymNow();
   return (
@@ -281,16 +326,13 @@ function FinancasApp({ code, view, onGo, email }) {
   const patchMonth = (m, fn) => update((d) => ({ ...d, months: { ...d.months, [m]: fn({ values: {}, paid: {}, extras: [], invoices: {}, receivables: [], received: {}, ...(d.months[m] || {}) }) } }));
   const cats = data.categories;
   const catOf = (id) => cats.find((c) => c.id === id) || { name: "Sem categoria", color: C.faint };
-  const people = Array.from(new Set([
-    ...data.cards.flatMap((c) => [c.usedBy, ...(c.subs || []).map((s) => s.who)]),
-    ...Object.values(data.months).flatMap((m) => (m.receivables || []).map((r) => r.who)),
-  ].filter(Boolean)));
-  const ctx = { data, update, ym, setYm, patchMonth, cats, catOf, say, people, onGo, email };
+  const people = data.people.map((p) => p.name);
+  const addPerson = (name) => update((d) => (d.people.some((p) => p.name === name) ? d : { ...d, people: [...d.people, { id: uid(), name }] }));
+  const ctx = { data, update, ym, setYm, patchMonth, cats, catOf, say, people, addPerson, onGo, email };
 
   return (
     <div style={{ animation: "fade .25s ease" }}>
       {flash && <div role="status" style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: "calc(env(safe-area-inset-bottom, 0px) + 100px)", zIndex: 30, background: C.ink, color: "#F3F5F9", padding: "9px 15px", borderRadius: 999, fontSize: 13, fontWeight: 500 }}>{flash}</div>}
-      <datalist id="fin-people">{people.map((p) => <option key={p} value={p} />)}</datalist>
       {view !== "fin-cadastros" && <MonthNav ym={ym} setYm={setYm} />}
       {view === "fin-mes" && <MesView {...ctx} />}
       {view === "fin-painel" && <PainelView {...ctx} />}
@@ -348,7 +390,7 @@ function MesView({ data, update, ym, patchMonth, cats, catOf, say, onGo }) {
         <div onClick={() => onGo && onGo("fin-cobrancas")} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", cursor: "pointer" }}>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13.5 }}>Recebimentos de terceiros</div>
-            <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>{m.cob.length ? `${brl(cobRecebido)} já recebido, ver cobranças` : "nada a receber neste mês"}</div>
+            <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>{m.cob.length ? `${brl(cobRecebido)} já recebido, ver A receber` : "nada a receber neste mês"}</div>
           </div>
           <div style={{ fontSize: 13.5, fontWeight: 500, color: C.good }}>{brl(m.totals.cobrancas)}</div>
         </div>
@@ -544,6 +586,7 @@ function PainelView({ data, ym, catOf, onGo }) {
   }), [data, ym]);
   const fmax = Math.max(1, ...futuro.map((f) => f.v));
   const sem = byCat._sem || 0;
+  const receber = useMemo(() => sum(Object.values(abertos(data, ymAdd(ymNow(), 1))), (o) => o.amount), [data]);
 
   return (
     <div>
@@ -554,8 +597,9 @@ function PainelView({ data, ym, catOf, onGo }) {
           <span>Entradas <b style={{ color: C.good, fontWeight: 600 }}>{brl(m.totals.entradas)}</b></span>
           <span>Sobra <b style={{ color: m.totals.sobra < 0 ? C.bad : C.good, fontWeight: 600 }}>{brl(m.totals.sobra)}</b></span>
           {data.savings.balance != null && <span>Na XP <b style={{ color: C.accent, fontWeight: 600 }}>{brl(data.savings.balance)}</b></span>}
+          {receber > 0 && <button onClick={() => onGo && onGo("fin-cobrancas")} style={{ ...iconbtn, display: "inline", padding: 0, fontSize: 12.5, color: C.sub, fontFamily: "inherit" }}>A receber <b style={{ color: C.sun, fontWeight: 600 }}>{brl(receber)}</b></button>}
         </div>
-        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 8, lineHeight: 1.45 }}>Não entra aqui o que é de terceiros (adicionais de outras pessoas, cartões emprestados e a parte dividida das compras).</div>
+        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 8, lineHeight: 1.45 }}>Não entra aqui o que é de outras pessoas nem a parte dividida das compras. Isso fica em A receber.</div>
       </div>
 
       <Title>Por categoria</Title>
@@ -616,92 +660,151 @@ function PainelView({ data, ym, catOf, onGo }) {
 }
 
 // ================= Cartões (lançamentos) =================
-function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, people }) {
+function CartoesView({ data, update, ym, setYm, patchMonth, cats, catOf, say, people, addPerson }) {
   const detailed = data.cards.filter((c) => c.mode !== "so_fatura" && !c.archived);
-  const [cardId, setCardId] = useState(detailed[0]?.id || null);
-  const [filter, setFilter] = useState("todos"); // todos | sem | sub id
-  const [form, setForm] = useState(null); // null | "new" | tx
+  const totOf = (id) => sum(data.txs.filter((t) => t.cardId === id).map((t) => txOcc(t, ym)).filter(Boolean));
+  const [cardId, setCardId] = useState(() => (detailed.find((c) => totOf(c.id)) || detailed[0])?.id || null);
+  const [filter, setFilter] = useState("todos"); // todos | sem | nosso | p:Nome
+  const [form, setForm] = useState(null); // null | "new" | id do lançamento em edição
+  const [open, setOpen] = useState(null); // lançamento aberto
   const [splitFor, setSplitFor] = useState(null);
+  const [menu, setMenu] = useState(false);
   useEffect(() => { if (!detailed.find((c) => c.id === cardId)) setCardId(detailed[0]?.id || null); }, [data.cards]);
+  useEffect(() => { setOpen(null); setMenu(false); setForm(null); }, [cardId, ym]);
   const c = detailed.find((x) => x.id === cardId);
-  const importBox = <ImportarFaturas data={data} update={update} people={people} say={say} onDone={(cid, m) => { setCardId(cid); setYm(m); setFilter("todos"); }} />;
-  if (!detailed.length) return <div>{importBox}<div style={{ ...card, padding: 18, fontSize: 13, color: C.sub, lineHeight: 1.5, borderStyle: "dashed" }}>Nenhum cartão com lançamentos detalhados. Importe uma fatura acima ou cadastre os cartões na aba Cadastros. Cartões que você só informa o valor da fatura ficam direto na aba Mês.</div></div>;
+  const importBox = <ImportarFaturas data={data} update={update} people={people} addPerson={addPerson} say={say} onDone={(cid, m) => { setCardId(cid); setYm(m); setFilter("todos"); }} />;
+  if (!c) return <div>{importBox}<div style={{ ...card, padding: 18, fontSize: 13, color: C.sub, lineHeight: 1.5, borderStyle: "dashed" }}>Nenhum cartão com lançamentos ainda. Importe uma fatura ou cadastre os cartões na aba Cadastros. Cartões em que você só informa o total da fatura ficam direto na aba Mês.</div></div>;
 
   const mo = data.months[ym] || {};
   const occs = data.txs.filter((t) => t.cardId === cardId).map((t) => txOcc(t, ym)).filter(Boolean)
     .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-  const shown = occs.filter((t) => filter === "todos" || (filter === "sem" ? !t.cat && !subOf(c, t.sub)?.who : t.sub === filter));
-  const semCount = occs.filter((t) => !t.cat && !subOf(c, t.sub)?.who).length;
+  const owners = Array.from(new Set(occs.map((t) => ownerOf(c, t)).filter(Boolean)));
+  const semCount = occs.filter((t) => !t.cat && !ownerOf(c, t)).length;
+  const shown = occs.filter((t) => {
+    if (filter === "sem") return !t.cat && !ownerOf(c, t);
+    if (filter === "nosso") return !ownerOf(c, t);
+    if (filter.startsWith("p:")) return ownerOf(c, t) === filter.slice(2);
+    return true;
+  });
   const splitOf = (t) => (mo.receivables || []).filter((r) => r.txId === t.id);
-
   const setTx = (id, patch) => update((d) => ({ ...d, txs: d.txs.map((t) => (t.id === id ? { ...t, ...patch } : t)) }));
   const delTx = (t) => {
-    const msg = (t.parcels || 1) > 1 ? `Apagar a compra "${t.desc}" e todas as parcelas dela?` : `Apagar "${t.desc}"?`;
+    const msg = (t.parcels || 1) > 1 && !t.anticipated ? `Apagar "${t.desc}" e todas as parcelas dessa compra?` : `Apagar "${t.desc}"?`;
     if (!window.confirm(msg)) return;
     update((d) => ({ ...d, txs: d.txs.filter((x) => x.id !== t.id) }));
+    setOpen(null);
   };
+  // Apaga o que entrou nesta fatura (o mês em que o lançamento nasceu). Parcelas de faturas anteriores ficam.
+  const own = data.txs.filter((t) => t.cardId === cardId && t.month === ym);
+  const apagarFatura = () => {
+    setMenu(false);
+    if (!own.length) { say("Nada lançado nesta fatura para apagar"); return; }
+    const kept = occs.length - own.length;
+    if (!window.confirm(`Apagar a fatura de ${ymLabel(ym)} do ${c.name}? Saem ${own.length} lançamentos e as parcelas futuras deles.${kept ? ` Ficam ${kept} parcelas que vieram de faturas anteriores.` : ""}`)) return;
+    const ids = new Set(own.map((t) => t.id));
+    update((d) => {
+      const m = d.months[ym];
+      const months = m ? { ...d.months, [ym]: { ...m, receivables: (m.receivables || []).filter((r) => !ids.has(r.txId)) } } : d.months;
+      return { ...d, txs: d.txs.filter((t) => !ids.has(t.id)), months };
+    });
+    say(`Fatura de ${ymLabel(ym)} apagada`);
+  };
+
+  const chips = [["todos", "Todos"], ...(semCount ? [["sem", `Sem categoria (${semCount})`]] : []), ...(owners.length ? [["nosso", "Nossos"], ...owners.map((o) => [`p:${o}`, `De ${o}`])] : [])];
 
   return (
     <div>
       {importBox}
       <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 12 }}>
         {detailed.map((x) => {
-          const on = x.id === cardId;
-          const tot = sum(data.txs.filter((t) => t.cardId === x.id).map((t) => txOcc(t, ym)).filter(Boolean));
-          return <button key={x.id} onClick={() => { setCardId(x.id); setFilter("todos"); setForm(null); }} style={{ flex: "0 0 auto", padding: "8px 13px", borderRadius: 12, cursor: "pointer", border: `1px solid ${on ? C.ink : C.line}`, background: on ? C.ink : C.surface, color: on ? "#fff" : C.sub, fontFamily: "inherit", textAlign: "left" }}>
-            <div style={{ fontSize: 12.5, fontWeight: 600 }}>{x.name}</div><div style={{ fontSize: 11.5, opacity: 0.8 }}>{brl(tot)}</div>
+          const on = x.id === cardId; const tot = totOf(x.id);
+          return <button key={x.id} onClick={() => { setCardId(x.id); setFilter("todos"); }} style={{ flex: "0 0 auto", padding: "8px 13px", borderRadius: 12, cursor: "pointer", border: `1px solid ${on ? C.ink : C.line}`, background: on ? C.ink : C.surface, color: on ? "#fff" : tot ? C.ink : C.faint, fontFamily: "inherit", textAlign: "left" }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600 }}>{x.name}</div><div style={{ fontSize: 11.5, opacity: on ? 0.8 : 1 }}>{tot ? brl(tot) : "sem fatura"}</div>
           </button>;
         })}
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, color: C.sub }}>Fatura de {ymLabel(ym)}: <b style={{ color: C.ink, fontWeight: 600 }}>{brl(sum(occs))}</b></div>
-        <button onClick={() => setForm(form === "new" ? null : "new")} style={{ ...dark, marginLeft: "auto", padding: "7px 12px" }}><Plus size={14} /> lançamento</button>
-      </div>
-      {form === "new" && <TxForm card={c} cats={cats} ym={ym} onCancel={() => setForm(null)} onSave={(t) => { update((d) => ({ ...d, txs: [...d.txs, { id: uid(), cardId: c.id, month: ym, ...t }] })); say("Lançamento adicionado"); setForm(null); }} />}
-
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-        {[["todos", "Todos"], ...(semCount ? [["sem", `Sem categoria (${semCount})`]] : []), ...(c.subs || []).map((s) => [s.id, s.who ? `${s.label || "adicional"} de ${s.who}` : (s.label || "titular")])].map(([k, l]) => (
-          <button key={k} onClick={() => setFilter(k)} style={{ ...btn, padding: "5px 10px", fontSize: 12, borderRadius: 99, background: filter === k ? C.ink : C.surface, color: filter === k ? "#fff" : C.sub, borderColor: filter === k ? C.ink : C.line }}>{l}</button>
-        ))}
-      </div>
-
-      {shown.length === 0 && <div style={{ ...card, padding: 16, fontSize: 12.5, color: C.faint, borderStyle: "dashed" }}>Nada por aqui nesta fatura.</div>}
-      {shown.map((t) => {
-        const s = subOf(c, t.sub); const third = s?.who; const splits = splitOf(t);
-        if (form && form.id === t.id) return <TxForm key={t.id} card={c} cats={cats} ym={ym} initial={t} onCancel={() => setForm(null)} onSave={(p) => { setTx(t.id, p); setForm(null); }} />;
-        return (
-          <div key={t.id} style={{ ...card, padding: "11px 13px", marginBottom: 8 }}>
-            <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 500 }}>{t.desc}</div>
-                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 4, alignItems: "center" }}>
-                  {t.date && <span style={{ fontSize: 11.5, color: C.faint }}>{ddmm(t.date)}</span>}
-                  {(t.parcels || 1) > 1 && <Pill>parcela {t.curParcel}/{t.parcels}{t.replicated ? `, lançada em ${ymLabel(t.month)}` : ""}</Pill>}
-                  {s && <Pill color={third ? C.sun : C.sub} soft={third ? C.sunSoft : "#EBEFF6"}>{third ? `de ${s.who}${s.label ? `, ${s.label}` : ""}` : s.label || "titular"}</Pill>}
-                  {splits.map((r) => <Pill key={r.id} color={C.good} soft={C.goodSoft}>{brl(r.amount)} a receber de {r.who}</Pill>)}
-                </div>
-              </div>
-              <div style={{ fontSize: 13.5, fontWeight: 500, whiteSpace: "nowrap" }}>{brl(t.amount)}</div>
-            </div>
-            <div style={{ display: "flex", gap: 6, marginTop: 9, alignItems: "center" }}>
-              {third ? <span style={{ flex: 1, fontSize: 11.5, color: C.faint }}>Vai para as cobranças de {s.who}.</span>
-                : <CatSelect cats={cats} value={t.cat} onChange={(v) => setTx(t.id, { cat: v || null })} style={{ flex: 1, fontSize: 12.5, padding: "6px 8px", background: t.cat ? "#F7F9FC" : C.sunSoft }} />}
-              {!third && <button onClick={() => setSplitFor(splitFor === t.id ? null : t.id)} title="Dividir com alguém" style={{ ...btn, padding: "6px 9px" }}><Users size={14} /></button>}
-              <button onClick={() => setForm(t)} title="Editar" style={{ ...btn, padding: "6px 9px" }}><Pencil size={13} /></button>
-              <button onClick={() => delTx(t)} title="Apagar" style={{ ...btn, padding: "6px 9px", color: C.bad }}><Trash2 size={13} /></button>
-            </div>
-            {splitFor === t.id && <SplitForm tx={t} people={people} splits={splits} onClose={() => setSplitFor(null)}
-              onAdd={(r) => { patchMonth(ym, (m2) => ({ ...m2, receivables: [...m2.receivables, { id: uid(), txId: t.id, ...r }] })); say(`Cobrança de ${r.who} criada`); }}
-              onDel={(id) => patchMonth(ym, (m2) => ({ ...m2, receivables: m2.receivables.filter((x) => x.id !== id) }))} />}
+      <div style={{ ...card, padding: "13px 15px", marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12.5, color: C.sub }}>Fatura de {ymLabel(ym)}, {c.name}</div>
+            <div className="lar-display" style={{ fontSize: 24, fontWeight: 600 }}>{brl(sum(occs))}</div>
+            <div style={{ fontSize: 11.5, color: C.faint }}>{occs.length} lançamentos{owners.length ? `, ${brl(sum(occs.filter((t) => ownerOf(c, t))))} de outras pessoas` : ""}</div>
           </div>
-        );
-      })}
+          <button onClick={() => setMenu(!menu)} aria-label="Mais opções" style={{ ...iconbtn, padding: 6 }}><MoreHorizontal size={18} /></button>
+        </div>
+        {menu && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
+            <button onClick={apagarFatura} style={{ ...btn, color: C.bad }}><Trash2 size={13} /> apagar esta fatura</button>
+            <button onClick={() => setMenu(false)} style={btn}>fechar</button>
+          </div>
+        )}
+        <button onClick={() => setForm(form === "new" ? null : "new")} style={{ ...btn, marginTop: 10, width: "100%", justifyContent: "center" }}><Plus size={14} /> lançar compra à mão</button>
+      </div>
+      {form === "new" && <TxForm card={c} cats={cats} ym={ym} people={people} addPerson={addPerson} onCancel={() => setForm(null)} onSave={(t) => { update((d) => ({ ...d, txs: [...d.txs, { id: uid(), cardId: c.id, month: ym, ...t }] })); say("Lançamento adicionado"); setForm(null); }} />}
+
+      {chips.length > 1 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+          {chips.map(([k, l]) => <button key={k} onClick={() => setFilter(k)} style={{ ...btn, padding: "5px 10px", fontSize: 12, borderRadius: 99, background: filter === k ? C.ink : C.surface, color: filter === k ? "#fff" : C.sub, borderColor: filter === k ? C.ink : C.line }}>{l}</button>)}
+        </div>
+      )}
+
+      {shown.length === 0 ? <div style={{ ...card, padding: 16, fontSize: 12.5, color: C.faint, borderStyle: "dashed" }}>Nada por aqui nesta fatura.</div> : (
+        <div style={{ ...card, padding: "0 14px" }}>
+          {shown.map((t, i) => {
+            const s = subOf(c, t.sub); const who = ownerOf(c, t); const splits = splitOf(t); const isOpen = open === t.id;
+            if (form === t.id) return <div key={t.id} style={{ padding: "10px 0" }}><TxForm card={c} cats={cats} ym={ym} people={people} addPerson={addPerson} initial={t} onCancel={() => setForm(null)} onSave={(p) => { setTx(t.id, p); setForm(null); }} /></div>;
+            const cat = catOf(t.cat);
+            return (
+              <div key={t.id} style={{ borderTop: i ? `1px solid ${C.line}` : "none" }}>
+                <div onClick={() => { setOpen(isOpen ? null : t.id); setSplitFor(null); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 0", cursor: "pointer" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.desc}</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 3, fontSize: 11.5, color: C.faint, flexWrap: "wrap" }}>
+                      {t.date && <span>{ddmm(t.date)}</span>}
+                      {who ? <span style={{ color: C.sun }}>de {who}</span>
+                        : t.cat ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><Dot color={cat.color} s={6} />{cat.name}</span>
+                        : <span style={{ color: C.sun }}>sem categoria</span>}
+                      {(t.parcels || 1) > 1 && <span>parcela {t.curParcel}/{t.parcels}</span>}
+                      {splits.length > 0 && <span style={{ color: C.good }}>{brl(sum(splits))} a receber</span>}
+                      {s?.label && (c.subs || []).length > 1 && <span>{s.label}</span>}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 13.5, fontWeight: 500, whiteSpace: "nowrap", color: t.amount < 0 ? C.good : C.ink }}>{brl(t.amount)}</div>
+                </div>
+                {isOpen && (
+                  <div style={{ padding: "2px 0 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <Field label="Categoria" style={{ flex: 1.4 }}>
+                        {who ? <div style={{ ...input, padding: "8px 9px", color: C.faint, background: "#F5F7FB" }}>vai para A receber</div>
+                          : <CatSelect cats={cats} value={t.cat} onChange={(v) => setTx(t.id, { cat: v || null })} style={{ fontSize: 12.5, background: t.cat ? "#F7F9FC" : C.sunSoft }} />}
+                      </Field>
+                      <Field label="De quem">
+                        <PeopleSelect value={who} people={people} onAdd={addPerson} style={{ fontSize: 12.5 }}
+                          onChange={(v) => { const inherited = s?.who || ""; setTx(t.id, { owner: v === inherited ? undefined : v }); }} />
+                      </Field>
+                    </div>
+                    {(t.parcels || 1) > 1 && t.replicated && <div style={{ fontSize: 11.5, color: C.faint }}>Parcela de uma compra que entrou na fatura de {ymLabel(t.month)}.</div>}
+                    <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                      {!who && <button onClick={() => setSplitFor(splitFor === t.id ? null : t.id)} style={{ ...btn, padding: "5px 10px", fontSize: 12 }}><Users size={13} /> dividir</button>}
+                      <button onClick={() => setForm(t.id)} style={{ ...btn, padding: "5px 10px", fontSize: 12 }}><Pencil size={12} /> editar</button>
+                      <button onClick={() => delTx(t)} style={{ ...btn, padding: "5px 10px", fontSize: 12, color: C.bad }}><Trash2 size={12} /> apagar</button>
+                    </div>
+                    {splitFor === t.id && <SplitForm tx={t} people={people} addPerson={addPerson} splits={splits} onClose={() => setSplitFor(null)}
+                      onAdd={(r) => { patchMonth(ym, (m2) => ({ ...m2, receivables: [...m2.receivables, { id: uid(), txId: t.id, ...r }] })); say(`${r.who} vai te pagar ${brl(r.amount)}`); }}
+                      onDel={(id) => patchMonth(ym, (m2) => ({ ...m2, receivables: m2.receivables.filter((x) => x.id !== id) }))} />}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
-function TxForm({ card: c, cats, initial, onSave, onCancel }) {
+function TxForm({ card: c, cats, initial, onSave, onCancel, people, addPerson }) {
   const [desc, setDesc] = useState(initial?.desc || "");
   const [val, setVal] = useState(toInput(initial?.amount));
   const [date, setDate] = useState(initial?.date || isoToday());
@@ -709,11 +812,13 @@ function TxForm({ card: c, cats, initial, onSave, onCancel }) {
   const [n, setN] = useState(String(initial?.parcels || 1));
   const [cat, setCat] = useState(initial?.cat || "");
   const [sub, setSub] = useState(initial?.sub || (c.subs || [])[0]?.id || "");
-  const subWho = subOf(c, sub)?.who;
+  const [owner, setOwner] = useState(initial ? ownerOf(c, initial) : null); // null = segue o cartão escolhido
+  const subWho = owner != null ? owner : subOf(c, sub)?.who || "";
   const save = () => {
     const amount = parseMoney(val); if (!desc.trim() || amount == null) return;
     const parcels = Math.max(1, parseInt(n) || 1);
-    onSave({ desc: desc.trim(), amount, date, parcel: Math.min(parcels, Math.max(1, parseInt(k) || 1)), parcels, cat: cat || null, sub: sub || null });
+    const inherited = subOf(c, sub)?.who || "";
+    onSave({ desc: desc.trim(), amount, date, parcel: Math.min(parcels, Math.max(1, parseInt(k) || 1)), parcels, cat: cat || null, sub: sub || null, owner: owner == null || owner === inherited ? undefined : owner });
   };
   return (
     <div style={{ ...card, padding: 14, marginBottom: 10, display: "flex", flexDirection: "column", gap: 10, borderStyle: "dashed", borderColor: C.accent }}>
@@ -731,12 +836,15 @@ function TxForm({ card: c, cats, initial, onSave, onCancel }) {
       {(c.subs || []).length > 0 && (
         <Field label="Cartão usado">
           <select value={sub} onChange={(e) => setSub(e.target.value)} style={{ ...input, padding: "8px 9px" }}>
-            {(c.subs || []).map((s) => <option key={s.id} value={s.id}>{s.label || "sem final"}{s.who ? `, de ${s.who}` : ", nosso"}</option>)}
+            {(c.subs || []).map((s) => <option key={s.id} value={s.id}>{s.label || "sem final"}{s.who ? ` (adicional de ${s.who})` : ""}</option>)}
           </select>
         </Field>
       )}
-      {!subWho && <Field label="Categoria"><CatSelect cats={cats} value={cat} onChange={setCat} /></Field>}
-      {subWho && <div style={{ fontSize: 12, color: C.sun }}>Este lançamento vai inteiro para as cobranças de {subWho}.</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <Field label="De quem é a despesa"><PeopleSelect value={subWho} people={people} onAdd={addPerson} onChange={setOwner} /></Field>
+        {!subWho && <Field label="Categoria" style={{ flex: 1.4 }}><CatSelect cats={cats} value={cat} onChange={setCat} /></Field>}
+      </div>
+      {subWho && <div style={{ fontSize: 12, color: C.sun }}>Vai inteiro para A receber de {subWho}.</div>}
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={onCancel} style={{ ...btn, flex: 1, justifyContent: "center" }}>cancelar</button>
         <button onClick={save} style={{ ...dark, flex: 2, justifyContent: "center" }}>salvar</button>
@@ -745,21 +853,21 @@ function TxForm({ card: c, cats, initial, onSave, onCancel }) {
   );
 }
 
-function SplitForm({ tx, people, splits, onAdd, onDel, onClose }) {
+function SplitForm({ tx, people, addPerson, splits, onAdd, onDel, onClose }) {
   const [who, setWho] = useState("");
   const [val, setVal] = useState("");
   const add = () => { const a = parseMoney(val); if (!who.trim() || a == null) return; onAdd({ who: who.trim(), amount: a, desc: tx.desc }); setWho(""); setVal(""); };
   return (
     <div style={{ marginTop: 10, padding: 12, background: "#F5F7FB", borderRadius: 10, display: "flex", flexDirection: "column", gap: 9 }}>
-      <div style={{ fontSize: 12.5, color: C.sub }}>Quanto cada pessoa te deve desta compra. Vira cobrança e sai do gasto da categoria.</div>
+      <div style={{ fontSize: 12.5, color: C.sub }}>Quanto cada pessoa te deve desta compra. Entra em A receber e sai do gasto da categoria.</div>
       {splits.map((r) => <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}><span style={{ flex: 1 }}>{r.who}</span><span>{brl(r.amount)}</span><button onClick={() => onDel(r.id)} style={iconbtn}><X size={14} /></button></div>)}
       <div style={{ display: "flex", gap: 8 }}>
-        <input style={{ ...input, flex: 2 }} list="fin-people" placeholder="Quem" value={who} onChange={(e) => setWho(e.target.value)} />
+        <PeopleSelect value={who} people={people} onAdd={addPerson} ours={null} onChange={setWho} style={{ flex: 2 }} />
         <input style={{ ...input, flex: 1 }} inputMode="decimal" placeholder="Valor" value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
       </div>
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={onClose} style={{ ...btn, flex: 1, justifyContent: "center", background: "#fff" }}>fechar</button>
-        <button onClick={add} style={{ ...dark, flex: 2, justifyContent: "center" }}>adicionar cobrança</button>
+        <button onClick={add} style={{ ...dark, flex: 2, justifyContent: "center" }}>adicionar</button>
       </div>
     </div>
   );
@@ -778,7 +886,7 @@ function loadPdfjs() {
   return pdfjsPromise;
 }
 
-function ImportarFaturas({ data, update, people, say, onDone }) {
+function ImportarFaturas({ data, update, people, addPerson, say, onDone }) {
   const [items, setItems] = useState([]); // { id, name, file, status: lendo|senha|erro|pronto, parsed, error }
   const inputRef = useRef(null);
   const read = async (it, password) => {
@@ -803,19 +911,23 @@ function ImportarFaturas({ data, update, people, say, onDone }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <input ref={inputRef} type="file" accept="application/pdf,.pdf" multiple style={{ display: "none" }} onChange={(e) => { pick(e.target.files); e.target.value = ""; }} />
-      <button onClick={() => inputRef.current?.click()} style={{ ...btn, width: "100%", justifyContent: "center", padding: "11px 12px", borderStyle: "dashed", color: C.accent, borderColor: "#BFCCEA" }}>
-        <FileUp size={15} /> Importar fatura em PDF
-      </button>
-      <div style={{ fontSize: 11.5, color: C.faint, margin: "6px 2px 0" }}>Itaú, Nubank, Santander e Mercado Pago. O PDF é lido no seu aparelho; só os lançamentos são salvos.</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <button onClick={() => inputRef.current?.click()} style={{ ...dark, padding: "8px 13px" }}><FileUp size={14} /> Importar fatura em PDF</button>
+        <span style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.35 }}>Itaú, Nubank, Santander e Mercado Pago</span>
+      </div>
       {items.map((it) => (
         <div key={it.id} style={{ marginTop: 10 }}>
           {it.status === "lendo" && <div style={{ ...card, padding: 14, fontSize: 13, color: C.sub }}>Lendo {it.name}…</div>}
           {it.status === "erro" && <div style={{ ...card, padding: 14, fontSize: 13, color: C.bad, display: "flex", gap: 8, alignItems: "center" }}><span style={{ flex: 1 }}>{it.name}: {it.error}</span><button onClick={() => drop(it.id)} style={iconbtn}><X size={15} /></button></div>}
           {it.status === "senha" && <PdfPassword name={it.name} error={it.error} onTry={(pw) => read(it, pw)} onCancel={() => drop(it.id)} />}
-          {it.status === "pronto" && <RevisarFatura key={it.id} name={it.name} parsed={it.parsed} data={data} people={people}
+          {it.status === "pronto" && <RevisarFatura key={it.id} name={it.name} parsed={it.parsed} data={data} people={people} addPerson={addPerson}
             onCancel={() => drop(it.id)}
             onImport={({ cardId, newCard, month, plan }) => {
-              update((d) => applyPlan(newCard ? { ...d, cards: [...d.cards, newCard] } : d, cardId, plan));
+              update((d) => {
+                const next = applyPlan(newCard ? { ...d, cards: [...d.cards, newCard] } : d, cardId, plan);
+                const names = plan.newSubs.map((x) => x.who).filter((w) => w && !next.people.some((p) => p.name === w));
+                return names.length ? { ...next, people: [...next.people, ...Array.from(new Set(names)).map((n) => ({ id: uid(), name: n }))] } : next;
+              });
               say(`${plan.count} lançamentos importados`);
               drop(it.id);
               onDone && onDone(cardId, month);
@@ -841,7 +953,7 @@ function PdfPassword({ name, error, onTry, onCancel }) {
   );
 }
 
-function RevisarFatura({ name, parsed, data, people, onImport, onCancel }) {
+function RevisarFatura({ name, parsed, data, people, addPerson, onImport, onCancel }) {
   const dueYm = parsed.due ? parsed.due.slice(0, 7) : ymNow();
   const [month, setMonth] = useState(dueYm);
   const [cardId, setCardId] = useState(guessCard(data, parsed) || "__novo");
@@ -890,7 +1002,7 @@ function RevisarFatura({ name, parsed, data, people, onImport, onCancel }) {
 
       <div>
         <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>Cartões nesta fatura</div>
-        <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 8, lineHeight: 1.45 }}>Confira pelo final, não pelo nome impresso. Preencha "de quem" só nos adicionais de outra pessoa: os lançamentos vão para as cobranças dela.</div>
+        <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 8, lineHeight: 1.45 }}>Confira pelo final, não pelo nome impresso. Nos adicionais de outra pessoa, escolha de quem é: os lançamentos dela vão para A receber. Dá para mudar depois em cada lançamento.</div>
         {parsed.cards.map((pc) => {
           const s = subs[pc.key] || { label: pc.key, who: "" };
           const ls = byKey(pc.key);
@@ -900,8 +1012,8 @@ function RevisarFatura({ name, parsed, data, people, onImport, onCancel }) {
                 <div style={{ fontSize: 13, fontWeight: 500 }}>{s.label}</div>
                 <div style={{ fontSize: 11, color: C.faint }}>{[pc.holder, `${ls.length} lançamentos`, brl(sum(ls))].filter(Boolean).join(", ")}</div>
               </div>
-              <input list="fin-people" value={s.who} placeholder="nosso" onChange={(e) => setSubs((m) => ({ ...m, [pc.key]: { ...s, who: e.target.value } }))}
-                style={{ ...input, width: 118, padding: "7px 9px", fontSize: 12.5, background: s.who ? C.sunSoft : "#F7F9FC" }} />
+              <PeopleSelect value={cleanWho(s.who)} people={people} onAdd={addPerson} onChange={(v) => setSubs((m) => ({ ...m, [pc.key]: { ...s, who: v } }))}
+                style={{ width: 130, padding: "7px 9px", fontSize: 12.5, background: cleanWho(s.who) ? C.sunSoft : "#F7F9FC" }} />
             </div>
           );
         })}
@@ -909,7 +1021,7 @@ function RevisarFatura({ name, parsed, data, people, onImport, onCancel }) {
 
       <div style={{ background: "#F5F7FB", borderRadius: 10, padding: "10px 12px", fontSize: 12.5, color: C.sub, lineHeight: 1.6 }}>
         <div><b style={{ color: C.ink, fontWeight: 600 }}>{plan.count}</b> lançamentos novos em {ymLabel(month)}{plan.skipped ? `, ${plan.skipped} já estavam no app e serão ignorados` : ""}.</div>
-        {plan.thirdCount > 0 && <div>{plan.thirdCount} vão para cobranças de terceiros.</div>}
+        {plan.thirdCount > 0 && <div>{plan.thirdCount} são de outras pessoas e vão para A receber.</div>}
         {plan.uncategorized > 0 && <div>{plan.uncategorized} ficam sem categoria para você revisar.</div>}
         {Object.keys(plan.updates).length > 0 && <div>{Object.keys(plan.updates).length} parcelas já lançadas em meses seguintes foram reconhecidas.</div>}
         {month !== dueYm && <div style={{ color: "#7A5B1E" }}>Atenção: o vencimento é em {ymLabel(dueYm)}.</div>}
@@ -946,8 +1058,8 @@ function ParcelasView({ data, ym, catOf }) {
   const rows = [
     ...data.installments.map((it) => ({ id: it.id, name: it.name, where: "fora do cartão", amount: it.amount, total: it.total, start: it.first, end: ymAdd(it.first, it.total - 1), cat: it.cat })),
     ...data.txs.filter((t) => (t.parcels || 1) > 1 && !t.anticipated).map((t) => {
-      const c = data.cards.find((x) => x.id === t.cardId); const s = subOf(c, t.sub);
-      return { id: t.id, name: t.desc, where: c?.name || "cartão", who: s?.who, amount: t.amount, total: t.parcels, start: ymAdd(t.month, -((t.parcel || 1) - 1)), end: txEnd(t), cat: t.cat };
+      const c = data.cards.find((x) => x.id === t.cardId);
+      return { id: t.id, name: t.desc, where: c?.name || "cartão", who: ownerOf(c, t), amount: t.amount, total: t.parcels, start: ymAdd(t.month, -((t.parcel || 1) - 1)), end: txEnd(t), cat: t.cat };
     }),
   ].map((r) => {
     const cur = ymDiff(r.start, ym) + 1;
@@ -955,20 +1067,20 @@ function ParcelasView({ data, ym, catOf }) {
     const remaining = active ? r.total - cur + 1 : future ? r.total : 0; // inclui a parcela deste mês
     return { ...r, cur, active, future, left: remaining * r.amount };
   });
-  const active = rows.filter((r) => r.active || r.future).sort((a, b) => a.end.localeCompare(b.end));
-  const done = rows.filter((r) => !r.active && !r.future);
+  const active = rows.filter((r) => r.active).sort((a, b) => a.end.localeCompare(b.end));
+  const done = rows.filter((r) => !r.active && !r.future && r.end < ym);
   const mensal = sum(rows.filter((r) => r.active && !r.who));
-  const saldo = sum(rows.filter((r) => !r.who), (r) => r.left);
+  const saldo = sum(rows.filter((r) => !r.who && r.active), (r) => r.left);
 
   return (
     <div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <div style={{ background: "#EBEFF6", borderRadius: 11, padding: "11px 13px" }}><div style={{ fontSize: 11.5, color: C.sub }}>Parcelas em {ymLabel(ym)}</div><div className="lar-display" style={{ fontSize: 19, fontWeight: 600 }}>{brl(mensal)}</div></div>
-        <div style={{ background: "#EBEFF6", borderRadius: 11, padding: "11px 13px" }}><div style={{ fontSize: 11.5, color: C.sub }}>Ainda a pagar (com este mês)</div><div className="lar-display" style={{ fontSize: 19, fontWeight: 600 }}>{brl(saldo)}</div></div>
+        <div style={{ background: "#EBEFF6", borderRadius: 11, padding: "11px 13px" }}><div style={{ fontSize: 11.5, color: C.sub }}>Parcelas de {ymLabel(ym)}</div><div className="lar-display" style={{ fontSize: 19, fontWeight: 600 }}>{brl(mensal)}</div></div>
+        <div style={{ background: "#EBEFF6", borderRadius: 11, padding: "11px 13px" }}><div style={{ fontSize: 11.5, color: C.sub }}>Falta pagar, contando este mês</div><div className="lar-display" style={{ fontSize: 19, fontWeight: 600 }}>{brl(saldo)}</div></div>
       </div>
-      <div style={{ fontSize: 11.5, color: C.faint, margin: "8px 2px 0" }}>Os totais não incluem parcelas de adicionais de terceiros.</div>
+      <div style={{ fontSize: 11.5, color: C.faint, margin: "8px 2px 0" }}>Os totais são só do casal. Parcelas de outras pessoas aparecem na lista, marcadas com o nome.</div>
       <Title icon={Layers}>Em andamento</Title>
-      {active.length === 0 && <div style={{ ...card, padding: 16, fontSize: 12.5, color: C.faint, borderStyle: "dashed" }}>Nenhum parcelamento ativo neste mês.</div>}
+      {active.length === 0 && <div style={{ ...card, padding: 16, fontSize: 12.5, color: C.faint, borderStyle: "dashed" }}>Nenhuma parcela neste mês.</div>}
       {active.map((r) => (
         <div key={r.id} style={{ ...card, padding: "12px 14px", marginBottom: 8 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
@@ -982,7 +1094,7 @@ function ParcelasView({ data, ym, catOf }) {
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 9 }}>
             <div style={{ flex: 1, height: 6, background: "#EBEFF6", borderRadius: 99, overflow: "hidden" }}><div style={{ width: `${(Math.max(0, r.cur) / r.total) * 100}%`, height: "100%", background: C.accent }} /></div>
-            <span style={{ fontSize: 11.5, color: C.sub, whiteSpace: "nowrap" }}>{r.future ? `começa em ${ymLabel(r.start)}` : `${r.cur}/${r.total}, termina em ${ymLabel(r.end)}`}</span>
+            <span style={{ fontSize: 11.5, color: C.sub, whiteSpace: "nowrap" }}>{r.cur}/{r.total}, até {ymLabel(r.end)}</span>
           </div>
         </div>
       ))}
@@ -994,54 +1106,76 @@ function ParcelasView({ data, ym, catOf }) {
   );
 }
 
-// ================= Cobranças (receber de terceiros) =================
-function CobrancasView({ data, ym, patchMonth, say, people }) {
+// ================= A receber (de terceiros) =================
+// Tudo que alguém te deve: em aberto de todos os meses no topo, detalhe do mês embaixo.
+function abertos(data, ateYm) {
+  const out = {};
+  for (let i = 0; i <= 24; i++) {
+    const y = ymAdd(ateYm, -i);
+    cobrancasOf(data, y).filter((x) => !x.received).forEach((x) => {
+      const o = (out[x.who] = out[x.who] || { amount: 0, months: {} });
+      o.amount += x.amount; o.months[y] = (o.months[y] || 0) + x.amount;
+    });
+  }
+  return out;
+}
+
+function CobrancasView({ data, ym, setYm, patchMonth, say, people, addPerson }) {
   const items = useMemo(() => cobrancasOf(data, ym), [data, ym]);
+  const open = useMemo(() => abertos(data, ymAdd(ymNow(), 1) > ym ? ymAdd(ymNow(), 1) : ym), [data, ym]);
   const [adding, setAdding] = useState(false);
   const [who, setWho] = useState(""); const [desc, setDesc] = useState(""); const [val, setVal] = useState("");
   const byWho = {};
   items.forEach((it) => { (byWho[it.who] = byWho[it.who] || []).push(it); });
   const names = Object.keys(byWho).sort((a, b) => sum(byWho[b]) - sum(byWho[a]));
-  // pendências de meses anteriores (até 12 meses)
-  const older = useMemo(() => {
-    const out = {};
-    for (let i = 1; i <= 12; i++) {
-      const y = ymAdd(ym, -i);
-      cobrancasOf(data, y).filter((x) => !x.received).forEach((x) => { out[x.who] = out[x.who] || { amount: 0, months: new Set() }; out[x.who].amount += x.amount; out[x.who].months.add(y); });
-    }
-    return out;
-  }, [data, ym]);
+  const openNames = Object.keys(open).sort((a, b) => open[b].amount - open[a].amount);
+  const totalOpen = sum(openNames, (n) => open[n].amount);
 
   const toggle = (key) => patchMonth(ym, (mo) => ({ ...mo, received: { ...mo.received, [key]: !mo.received[key] } }));
   const allReceived = (name, val2) => patchMonth(ym, (mo) => { const r = { ...mo.received }; byWho[name].forEach((it) => { r[it.key] = val2; }); return { ...mo, received: r }; });
   const message = (name) => {
-    const list = byWho[name];
+    const list = byWho[name].filter((it) => !it.received);
     const lines = list.map((it) => `- ${it.date ? ddmm(it.date) + " " : ""}${it.desc}${it.parcel ? ` (parcela ${it.parcel})` : ""}: ${brl(it.amount)}`);
     return `Oi, ${name}! Seguem os valores de ${ymLabel(ym)}:\n${lines.join("\n")}\nTotal: ${brl(sum(list))}`;
   };
   const copy = async (name) => { try { await navigator.clipboard.writeText(message(name)); say("Mensagem copiada"); } catch (e) { say("Não deu para copiar neste navegador"); } };
   const addManual = () => {
-    const a = parseMoney(val); if (!who.trim() || !desc.trim() || a == null) return;
-    patchMonth(ym, (mo) => ({ ...mo, receivables: [...mo.receivables, { id: uid(), who: who.trim(), desc: desc.trim(), amount: a }] }));
-    setWho(""); setDesc(""); setVal(""); setAdding(false); say("Cobrança adicionada");
+    const a = parseMoney(val); if (!who || !desc.trim() || a == null) return;
+    patchMonth(ym, (mo) => ({ ...mo, receivables: [...mo.receivables, { id: uid(), who, desc: desc.trim(), amount: a }] }));
+    setDesc(""); setVal(""); setAdding(false); say(`${who} vai te pagar ${brl(a)}`);
   };
   const delManual = (id) => patchMonth(ym, (mo) => ({ ...mo, receivables: mo.receivables.filter((r) => r.id !== id) }));
 
   return (
     <div>
-      <div style={{ ...card, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 12.5, color: C.sub }}>A receber em {ymLabel(ym)}</div>
-          <div className="lar-display" style={{ fontSize: 24, fontWeight: 600 }}>{brl(sum(items))}</div>
-          <div style={{ fontSize: 12, color: C.faint, marginTop: 2 }}>{brl(sum(items.filter((i) => i.received)))} já recebido</div>
+      <div style={{ ...card, padding: "14px 16px" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12.5, color: C.sub }}>Em aberto, somando todos os meses</div>
+            <div className="lar-display" style={{ fontSize: 26, fontWeight: 600, color: totalOpen ? C.ink : C.good }}>{brl(totalOpen)}</div>
+          </div>
+          <button onClick={() => setAdding(!adding)} style={dark}><Plus size={14} /> a receber</button>
         </div>
-        <button onClick={() => setAdding(!adding)} style={dark}><Plus size={14} /> cobrança</button>
+        {openNames.length === 0 && <div style={{ fontSize: 12.5, color: C.good, marginTop: 6 }}>Ninguém te deve nada agora.</div>}
+        {openNames.map((n) => (
+          <div key={n} style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "9px 0", borderTop: `1px solid ${C.line}`, marginTop: 6 }}>
+            <Dot color={C.sun} /><span style={{ fontSize: 13.5, fontWeight: 500, flex: 1 }}>{n}</span>
+            <span style={{ fontSize: 11.5, color: C.faint, display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              {Object.keys(open[n].months).sort().map((m) => (
+                <button key={m} onClick={() => setYm(m)} style={{ ...iconbtn, display: "inline", padding: 0, fontSize: 11.5, fontFamily: "inherit", color: m === ym ? C.ink : C.accent, fontWeight: m === ym ? 600 : 400 }}>{ymLabel(m)}</button>
+              ))}
+            </span>
+            <span style={{ fontSize: 13.5, fontWeight: 600, minWidth: 86, textAlign: "right" }}>{brl(open[n].amount)}</span>
+          </div>
+        ))}
+        {openNames.length > 0 && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>Toque no mês para ver o detalhe e marcar o que já foi pago.</div>}
       </div>
+
       {adding && (
         <div style={{ ...card, padding: 14, marginTop: 10, display: "flex", flexDirection: "column", gap: 10, borderStyle: "dashed", borderColor: C.accent }}>
-          <div style={{ fontSize: 12.5, color: C.sub }}>Algo que alguém te deve e não está ligado a um lançamento específico. Para dividir uma compra do cartão, use o botão de pessoas no lançamento.</div>
+          <div style={{ fontSize: 12.5, color: C.sub }}>Algo que alguém te deve em {ymLabel(ym)}. Para dividir uma compra do cartão, use "dividir" no próprio lançamento.</div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Field label="Quem"><input style={input} list="fin-people" value={who} onChange={(e) => setWho(e.target.value)} autoFocus /></Field>
+            <Field label="Quem"><PeopleSelect value={who} people={people} onAdd={addPerson} ours={null} onChange={setWho} /></Field>
             <Field label="Valor"><input style={input} inputMode="decimal" value={val} onChange={(e) => setVal(e.target.value)} placeholder="0,00" /></Field>
           </div>
           <Field label="Do que é"><input style={input} value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Ingresso do show" /></Field>
@@ -1052,11 +1186,12 @@ function CobrancasView({ data, ym, patchMonth, say, people }) {
         </div>
       )}
 
-      {names.length === 0 && <div style={{ ...card, padding: 16, marginTop: 14, fontSize: 12.5, color: C.faint, borderStyle: "dashed", lineHeight: 1.5 }}>Nada a cobrar neste mês. Entram aqui sozinhos os lançamentos de cartões adicionais de outra pessoa, os cartões emprestados e as compras que você dividiu.</div>}
+      <Title>Em {ymLabel(ym)}</Title>
+      {names.length === 0 && <div style={{ ...card, padding: 16, fontSize: 12.5, color: C.faint, borderStyle: "dashed", lineHeight: 1.5 }}>Nada a receber neste mês. Entram aqui sozinhos os lançamentos marcados como de outra pessoa, os cartões emprestados e as compras divididas.</div>}
       {names.map((name) => {
         const list = byWho[name]; const tot = sum(list); const got = sum(list.filter((i) => i.received)); const done = got >= tot && tot > 0;
         return (
-          <div key={name} style={{ ...card, padding: "13px 15px", marginTop: 12 }}>
+          <div key={name} style={{ ...card, padding: "13px 15px", marginBottom: 12 }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
               <span className="lar-display" style={{ fontSize: 16, fontWeight: 600, flex: 1 }}>{name}</span>
               <span style={{ fontSize: 15, fontWeight: 600, color: done ? C.good : C.ink }}>{brl(tot)}</span>
@@ -1083,27 +1218,14 @@ function CobrancasView({ data, ym, patchMonth, say, people }) {
           </div>
         );
       })}
-
-      {Object.keys(older).length > 0 && <>
-        <Title>Pendentes de meses anteriores</Title>
-        <div style={{ ...card, padding: "4px 15px" }}>
-          {Object.entries(older).map(([name, o], i, arr) => (
-            <div key={name} style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "10px 0", borderBottom: i < arr.length - 1 ? `1px solid ${C.line}` : "none" }}>
-              <span style={{ fontSize: 13.5, flex: 1 }}>{name}</span>
-              <span style={{ fontSize: 11.5, color: C.faint }}>{[...o.months].sort().map(ymLabel).join(", ")}</span>
-              <span style={{ fontSize: 13.5, fontWeight: 500, color: C.bad }}>{brl(o.amount)}</span>
-            </div>
-          ))}
-        </div>
-        <div style={{ fontSize: 11.5, color: C.faint, margin: "6px 2px" }}>Volte o mês no topo para marcar como recebido.</div>
-      </>}
     </div>
   );
 }
 
 // ================= Cadastros =================
-function CadastrosView({ data, update, say, email }) {
+function CadastrosView({ data, update, say, email, people, addPerson }) {
   const [editCard, setEditCard] = useState(null); // id | "new"
+  const [newPerson, setNewPerson] = useState("");
   const [newCat, setNewCat] = useState("");
   const [bal, setBal] = useState(toInput(data.savings.balance));
   useEffect(() => { setBal(toInput(data.savings.balance)); }, [data.savings.balance]);
@@ -1124,8 +1246,45 @@ function CadastrosView({ data, update, say, email }) {
       months: Object.fromEntries(Object.entries(d.months).map(([k, m]) => [k, { ...m, extras: (m.extras || []).map(strip) }])) }));
   };
 
+  // Pessoas: o nome é a referência usada nos cartões, lançamentos e no A receber
+  const swapName = (d, from, to) => ({
+    ...d,
+    people: to ? d.people.map((p) => (p.name === from ? { ...p, name: to } : p)) : d.people.filter((p) => p.name !== from),
+    cards: d.cards.map((c) => ({ ...c, usedBy: c.usedBy === from ? to : c.usedBy, subs: (c.subs || []).map((sb) => (sb.who === from ? { ...sb, who: to } : sb)) })),
+    txs: d.txs.map((t) => (t.owner === from ? { ...t, owner: to || undefined } : t)),
+    months: Object.fromEntries(Object.entries(d.months).map(([k, m]) => [k, { ...m, receivables: (m.receivables || []).map((r) => (r.who === from && to ? { ...r, who: to } : r)) }])),
+  });
+  const renamePerson = (from, to) => {
+    const n = to.trim(); if (!n || n === from || !cleanWho(n)) return;
+    if (data.people.some((p) => p.name === n)) { say("Já existe alguém com esse nome"); return; }
+    update((d) => swapName(d, from, n)); say("Nome atualizado");
+  };
+  const removePerson = (name) => {
+    if (!window.confirm(`Tirar ${name} do cadastro? Os lançamentos que eram de ${name} voltam a ser de vocês.`)) return;
+    update((d) => swapName(d, name, ""));
+  };
+  const addNew = () => { const n = newPerson.trim(); if (!n || !cleanWho(n)) return; addPerson(n); setNewPerson(""); };
+
   return (
     <div>
+      <Title icon={Users} color={C.sun}>Pessoas</Title>
+      <div style={{ ...card, padding: "6px 15px" }}>
+        <div style={{ fontSize: 11.5, color: C.faint, padding: "8px 0 4px", lineHeight: 1.45 }}>Quem pode ter despesas no cartão de vocês ou te dever dinheiro. O que for de cada pessoa aparece em A receber.</div>
+        {data.people.length === 0 && <div style={{ fontSize: 12.5, color: C.faint, padding: "8px 0" }}>Ninguém cadastrado ainda.</div>}
+        {data.people.map((p) => (
+          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "6px 0", borderBottom: `1px solid ${C.line}` }}>
+            <Dot color={C.sun} />
+            <input defaultValue={p.name} onBlur={(e) => { if (e.target.value.trim() !== p.name) renamePerson(p.name, e.target.value); }} onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+              style={{ ...input, background: "transparent", border: "1px solid transparent", padding: "5px 6px" }} />
+            <button onClick={() => removePerson(p.name)} style={iconbtn} aria-label={`Tirar ${p.name}`}><Trash2 size={14} /></button>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, padding: "10px 0" }}>
+          <input style={input} placeholder="Nome (ex.: Marcia)" value={newPerson} onChange={(e) => setNewPerson(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addNew()} />
+          <button onClick={addNew} style={dark}>adicionar</button>
+        </div>
+      </div>
+
       <Title icon={PiggyBank} color={C.accent}>Reserva na XP</Title>
       <div style={{ ...card, padding: "14px 15px" }}>
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
@@ -1140,10 +1299,10 @@ function CadastrosView({ data, update, say, email }) {
       </div>
 
       <Title icon={CreditCard} color={C.accent} right={<button onClick={() => setEditCard(editCard === "new" ? null : "new")} style={{ ...btn, padding: "5px 10px", fontSize: 12 }}><Plus size={13} /> cartão</button>}>Cartões</Title>
-      {editCard === "new" && <CardForm onCancel={() => setEditCard(null)} cats={data.categories} onSave={(c) => { update((d) => ({ ...d, cards: [...d.cards, { id: uid(), ...c }] })); setEditCard(null); say("Cartão adicionado"); }} />}
+      {editCard === "new" && <CardForm people={people} addPerson={addPerson} onCancel={() => setEditCard(null)} cats={data.categories} onSave={(c) => { update((d) => ({ ...d, cards: [...d.cards, { id: uid(), ...c }] })); setEditCard(null); say("Cartão adicionado"); }} />}
       {data.cards.length === 0 && editCard !== "new" && <div style={{ ...card, padding: 16, fontSize: 12.5, color: C.faint, borderStyle: "dashed" }}>Nenhum cartão ainda.</div>}
       {data.cards.map((c) => editCard === c.id
-        ? <CardForm key={c.id} initial={c} cats={data.categories} onCancel={() => setEditCard(null)} onSave={(p) => { update((d) => ({ ...d, cards: d.cards.map((x) => (x.id === c.id ? { ...x, ...p } : x)) })); setEditCard(null); }}
+        ? <CardForm key={c.id} people={people} addPerson={addPerson} initial={c} cats={data.categories} onCancel={() => setEditCard(null)} onSave={(p) => { update((d) => ({ ...d, cards: d.cards.map((x) => (x.id === c.id ? { ...x, ...p } : x)) })); setEditCard(null); }}
             onArchive={() => { update((d) => ({ ...d, cards: d.cards.map((x) => (x.id === c.id ? { ...x, archived: !x.archived } : x)) })); setEditCard(null); }} />
         : (
           <div key={c.id} onClick={() => setEditCard(c.id)} style={{ ...card, padding: "11px 14px", marginBottom: 8, cursor: "pointer", opacity: c.archived ? 0.6 : 1 }}>
@@ -1181,13 +1340,13 @@ function CadastrosView({ data, update, say, email }) {
   );
 }
 
-function CardForm({ initial, cats, onSave, onCancel, onArchive }) {
+function CardForm({ initial, cats, onSave, onCancel, onArchive, people, addPerson }) {
   const [name, setName] = useState(initial?.name || "");
   const [mode, setMode] = useState(initial?.mode || "detalhado");
   const [usedBy, setUsedBy] = useState(initial?.usedBy || "");
   const [cat, setCat] = useState(initial?.cat || "");
   const [subs, setSubs] = useState(initial?.subs || []);
-  const save = () => { if (!name.trim()) return; onSave({ name: name.trim(), mode, usedBy: mode === "so_fatura" ? usedBy.trim() : "", cat: mode === "so_fatura" ? cat || null : null, subs: mode === "detalhado" ? subs.map((s) => ({ ...s, label: s.label.trim(), who: s.who.trim() })) : [] }); };
+  const save = () => { if (!name.trim()) return; onSave({ name: name.trim(), mode, usedBy: mode === "so_fatura" ? cleanWho(usedBy) : "", cat: mode === "so_fatura" ? cat || null : null, subs: mode === "detalhado" ? subs.map((s) => ({ ...s, label: s.label.trim(), who: cleanWho(s.who) })) : [] }); };
   const setSub = (id, patch) => setSubs((l) => l.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   return (
     <div style={{ ...card, padding: 14, marginBottom: 10, display: "flex", flexDirection: "column", gap: 10, borderStyle: "dashed", borderColor: C.accent }}>
@@ -1196,7 +1355,7 @@ function CardForm({ initial, cats, onSave, onCancel, onArchive }) {
       {mode === "so_fatura" && <>
         <div style={{ fontSize: 11.5, color: C.faint }}>Para cartão emprestado: você só informa o total da fatura todo mês, sem lançamentos.</div>
         <div style={{ display: "flex", gap: 8 }}>
-          <Field label="Quem usa (vira cobrança)"><input style={input} list="fin-people" value={usedBy} onChange={(e) => setUsedBy(e.target.value)} placeholder="vazio se for de vocês" /></Field>
+          <Field label="Quem usa"><PeopleSelect value={usedBy} people={people} onAdd={addPerson} ours="Ninguém, é nosso" onChange={setUsedBy} /></Field>
           {!usedBy.trim() && <Field label="Categoria"><CatSelect cats={cats} value={cat} onChange={setCat} /></Field>}
         </div>
       </>}
@@ -1206,7 +1365,7 @@ function CardForm({ initial, cats, onSave, onCancel, onArchive }) {
         {subs.map((s) => (
           <div key={s.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <input style={{ ...input, flex: 1 }} value={s.label} onChange={(e) => setSub(s.id, { label: e.target.value })} placeholder="final 1234" />
-            <input style={{ ...input, flex: 1 }} list="fin-people" value={s.who} onChange={(e) => setSub(s.id, { who: e.target.value })} placeholder="de quem (vazio = nosso)" />
+            <PeopleSelect value={s.who} people={people} onAdd={addPerson} onChange={(v) => setSub(s.id, { who: v })} style={{ flex: 1 }} />
             <button onClick={() => setSubs((l) => l.filter((x) => x.id !== s.id))} style={iconbtn} aria-label="Remover"><X size={14} /></button>
           </div>
         ))}
