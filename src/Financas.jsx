@@ -216,6 +216,28 @@ function computeMonth(data, ym) {
   };
 }
 
+// O que ainda falta pagar no mês: despesas (fixas, avulsas, parcelas) e faturas de cartão.
+// Fatura zerada e já preenchida não conta; "só fatura" sem valor conta como pendente.
+function unpaidOf(m) {
+  const due = [
+    ...m.despesas.map((d) => ({ id: d.id, paid: d.paid })),
+    ...m.cards.filter((x) => x.total > 0 || !x.filled).map((x) => ({ id: `card:${x.card.id}`, paid: x.paid })),
+  ];
+  return { total: due.length, unpaid: due.filter((d) => !d.paid).map((d) => d.id) };
+}
+
+// Mês em aberto = mês de pagamento. Novembro paga os gastos de outubro.
+// Começa no mês do calendário; se tudo daquele mês já foi pago, o app passa para o seguinte.
+function openMonthOf(data) {
+  let ym = ymNow();
+  for (let i = 0; i < 3; i++) {
+    const { total, unpaid } = unpaidOf(computeMonth(data, ym));
+    if (!total || unpaid.length) break;
+    ym = ymAdd(ym, 1);
+  }
+  return ym;
+}
+
 // Quanto foi gasto em cada categoria no mês (só o que é do casal: tira a parte de terceiros)
 function spendByCat(data, ym) {
   const m = computeMonth(data, ym);
@@ -339,14 +361,15 @@ function PeopleSelect({ value, onChange, people, onAdd, ours = CASAL, style }) {
   );
 }
 
-function MonthNav({ ym, setYm }) {
-  const now = ymNow();
+function MonthNav({ ym, setYm, openYm }) {
+  const prevMes = MES_LONGO[Number(ymAdd(ym, -1).slice(5)) - 1];
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
       <button onClick={() => setYm(ymAdd(ym, -1))} style={{ ...btn, padding: 8 }} aria-label="Mês anterior"><ChevronLeft size={18} /></button>
       <div style={{ textAlign: "center" }}>
         <div className="lar-display" style={{ fontSize: 18, fontWeight: 600 }}>{ymLong(ym).replace(/^./, (c) => c.toUpperCase())}</div>
-        {ym !== now ? <button onClick={() => setYm(now)} style={{ ...iconbtn, display: "inline", fontSize: 12, color: C.accent, fontFamily: "inherit" }}>voltar para o mês atual</button> : <div style={{ fontSize: 12, color: C.faint }}>mês atual</div>}
+        <div style={{ fontSize: 12, color: C.faint }}>pagamento dos gastos de {prevMes}</div>
+        {ym !== openYm ? <button onClick={() => setYm(openYm)} style={{ ...iconbtn, display: "inline", fontSize: 12, color: C.accent, fontFamily: "inherit" }}>ir para o mês em aberto ({MES_LONGO[Number(openYm.slice(5)) - 1]})</button> : <div style={{ fontSize: 12, color: C.accent }}>mês em aberto</div>}
       </div>
       <button onClick={() => setYm(ymAdd(ym, 1))} style={{ ...btn, padding: 8 }} aria-label="Próximo mês"><ChevronRight size={18} /></button>
     </div>
@@ -362,11 +385,13 @@ export default function Financas({ code, view, onGo, email, casal }) {
 
 function FinancasApp({ code, view, onGo, email }) {
   const { data, update, error } = useFinances(code, true);
-  const [ym, setYm] = useState(ymNow());
+  const [ym, setYm] = useState(null);
   const [flash, setFlash] = useState(null);
-  const say = (t) => { setFlash(t); setTimeout(() => setFlash(null), 2200); };
+  const say = (t) => { setFlash(t); setTimeout(() => setFlash(null), 2600); };
+  const openYm = useMemo(() => (data ? openMonthOf(data) : null), [data]);
+  useEffect(() => { if (data && ym == null) setYm(openMonthOf(data)); }, [data]);
   if (error) return <div style={{ ...card, padding: 18, background: C.badSoft, borderColor: "#F2D2DF", fontSize: 13, color: "#8A2E4E", lineHeight: 1.5 }}>Não consegui abrir as finanças: {error}. Confira se o SQL da tabela finances foi rodado no Supabase.</div>;
-  if (!data) return <div style={{ textAlign: "center", color: C.faint, fontSize: 13, padding: 40 }}>Carregando as finanças…</div>;
+  if (!data || !ym) return <div style={{ textAlign: "center", color: C.faint, fontSize: 13, padding: 40 }}>Carregando as finanças…</div>;
 
   // helpers de edição do mês
   const patchMonth = (m, fn) => update((d) => ({ ...d, months: { ...d.months, [m]: fn({ values: {}, paid: {}, extras: [], invoices: {}, receivables: [], received: {}, ...(d.months[m] || {}) }) } }));
@@ -374,12 +399,12 @@ function FinancasApp({ code, view, onGo, email }) {
   const catOf = (id) => cats.find((c) => c.id === id) || { name: "Sem categoria", color: C.faint };
   const people = data.people.map((p) => p.name);
   const addPerson = (name) => update((d) => (d.people.some((p) => p.name === name) ? d : { ...d, people: [...d.people, { id: uid(), name }] }));
-  const ctx = { data, update, ym, setYm, patchMonth, cats, catOf, say, people, addPerson, onGo, email };
+  const ctx = { data, update, ym, setYm, openYm, patchMonth, cats, catOf, say, people, addPerson, onGo, email };
 
   return (
     <div style={{ animation: "fade .25s ease" }}>
       {flash && <div role="status" style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: "calc(env(safe-area-inset-bottom, 0px) + 100px)", zIndex: 30, background: C.ink, color: "#F3F5F9", padding: "9px 15px", borderRadius: 999, fontSize: 13, fontWeight: 500 }}>{flash}</div>}
-      {view !== "fin-cadastros" && <MonthNav ym={ym} setYm={setYm} />}
+      {view !== "fin-cadastros" && <MonthNav ym={ym} setYm={setYm} openYm={openYm} />}
       {view === "fin-mes" && <MesView {...ctx} />}
       {view === "fin-painel" && <PainelView {...ctx} />}
       {view === "fin-cartoes" && <CartoesView {...ctx} />}
@@ -391,11 +416,21 @@ function FinancasApp({ code, view, onGo, email }) {
 }
 
 // ================= Mês (controle de caixa) =================
-function MesView({ data, update, ym, patchMonth, cats, catOf, say, onGo }) {
+function MesView({ data, update, ym, setYm, openYm, patchMonth, cats, catOf, say, onGo }) {
   const m = useMemo(() => computeMonth(data, ym), [data, ym]);
   const [edit, setEdit] = useState(null);
   const [adding, setAdding] = useState(null); // entrada | despesa | poupanca
-  const togglePaid = (id) => patchMonth(ym, (mo) => ({ ...mo, paid: { ...mo.paid, [id]: !mo.paid[id] } }));
+  const pend = unpaidOf(m);
+  const togglePaid = (id) => {
+    const marking = pend.unpaid.includes(id);
+    patchMonth(ym, (mo) => ({ ...mo, paid: { ...mo.paid, [id]: !mo.paid[id] } }));
+    // Pagou a última conta do mês em aberto: o mês fecha e o app passa para o seguinte
+    if (marking && ym === openYm && pend.unpaid.length === 1) {
+      const next = ymAdd(ym, 1);
+      say(`${MES_LONGO[Number(ym.slice(5)) - 1].replace(/^./, (c) => c.toUpperCase())} pago. Agora o mês em aberto é ${MES_LONGO[Number(next.slice(5)) - 1]}.`);
+      setTimeout(() => setYm(next), 900);
+    }
+  };
 
   const groups = {};
   m.despesas.forEach((d) => { (groups[d.cat || "_sem"] = groups[d.cat || "_sem"] || []).push(d); });
@@ -420,6 +455,11 @@ function MesView({ data, update, ym, patchMonth, cats, catOf, say, onGo }) {
 
   return (
     <div>
+      {pend.total > 0 && (
+        <div style={{ fontSize: 12.5, color: pend.unpaid.length ? C.sub : C.good, marginBottom: 10, textAlign: "center" }}>
+          {pend.unpaid.length ? `${pend.total - pend.unpaid.length} de ${pend.total} contas pagas` : "Todas as contas deste mês estão pagas"}
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
         {[["Entradas", m.totals.entradas, C.good], ["Saídas", m.totals.saidas, C.ink], ["Guardar", m.totals.guardar, C.accent], ["Sobra do mês", m.totals.sobra, m.totals.sobra < 0 ? C.bad : C.good]].map(([l, v, col]) => (
           <div key={l} style={{ background: "#EBEFF6", borderRadius: 11, padding: "11px 13px" }}>
